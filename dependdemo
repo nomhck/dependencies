@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>依存関係エディタ（オフラインPoC／CDN不使用）</title>
+<style>
+  :root{
+    --brand:#fe001a; --bg:#0f1115; --panel:#171a21;
+    --muted:#aab1c5; --text:#e6e9f2; --line:#7aa2ff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:Segoe UI,system-ui,Arial}
+  header{
+    display:flex;gap:10px;align-items:center;padding:10px 12px;border-bottom:3px solid var(--brand);
+    background:linear-gradient(90deg, rgba(254,0,26,.12), transparent 40%);
+  }
+  header h1{font-size:16px;margin:0 10px 0 0}
+  header input{background:#0b0d11;color:var(--text);border:1px solid #2a2f3a;border-radius:6px;padding:6px 8px;width:220px}
+  header .spacer{flex:1}
+  .btn{background:#202737;color:#fff;border:1px solid #2a2f3a;padding:8px 10px;border-radius:8px;cursor:pointer}
+  .btn.brand{background:var(--brand);border-color:transparent;font-weight:700}
+  .btn.warn{background:#3b291f;border-color:#6f4a3a}
+  .btn.ghost{background:transparent;border-color:#3b4761}
+  .btn.toggle.on{outline:2px solid #fff}
+  main{display:grid;grid-template-columns:280px 1fr 320px;gap:10px;padding:10px;height:calc(100vh - 58px)}
+  .panel{background:var(--panel);border:1px solid #232836;border-radius:10px;padding:10px;overflow:auto}
+  #stageWrap{position:relative;height:100%}
+  #stage{width:100%;height:100%;background:#0b0d11;border-radius:10px}
+  .label{font-size:12px;color:#cbd2e9;margin:6px 0 2px}
+  input[type=search], select, input[type=text]{
+    width:100%;background:#0b0d11;color:var(--text);border:1px solid #2a2f3a;border-radius:8px;padding:8px
+  }
+  .row{display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap}
+  .kv{font-size:13px;color:#cfd6ec;margin:4px 0}
+  .kv b{color:#fff}
+  .muted{color:var(--muted);font-size:12px}
+  a.link{color:#7cc4ff}
+  .legend{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+  .legend .item{display:flex;align-items:center;gap:6px;font-size:12px}
+  .dot{width:12px;height:12px;border-radius:50%}
+  .log{font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.45;white-space:pre-wrap;background:#0b0d11;border:1px solid #2a2f3a;border-radius:8px;padding:8px;max-height:180px;overflow:auto}
+  #toast{position:fixed;right:14px;bottom:14px;background:#1b2433;border:1px solid #2f3a52;padding:10px 12px;border-radius:10px;max-width:360px;display:none;z-index:3}
+  /* SVG node styles (for hit area) */
+  .node rect,.node path{cursor:move}
+  .node.selected rect,.node.selected path{stroke:#fff;stroke-width:3}
+  .edge{cursor:pointer}
+  .edge.selected{stroke:#fff !important; stroke-width:3 !important}
+</style>
+</head>
+<body>
+<header>
+  <h1>依存関係エディタ（オフラインPoC）</h1>
+  <div>ユーザー/User:</div><input id="userName" placeholder="例: HAYATO NOMURA" />
+  <div class="spacer"></div>
+  <button id="btnConnect" class="btn toggle">接続モード</button>
+  <button id="btnLayout" class="btn">オートレイアウト</button>
+  <button id="btnAddSample" class="btn ghost">サンプル追加</button>
+  <button id="btnSave" class="btn brand">保存 / Save</button>
+  <button id="btnLoad" class="btn">読込 / Load</button>
+  <button id="btnHardReset" class="btn warn">ハードリセット</button>
+</header>
+
+<main>
+  <section class="panel">
+    <h2 style="margin:0 0 8px">フィルタ / Filters</h2>
+    <div class="label">検索（名前・タグ）/ Search</div>
+    <input id="q" type="search" placeholder="Type to filter..." />
+    <div class="label">種別 / Type</div>
+    <div class="row">
+      <label><input type="checkbox" class="typechk" value="System" checked> System</label>
+      <label><input type="checkbox" class="typechk" value="Dataset" checked> Dataset</label>
+      <label><input type="checkbox" class="typechk" value="Document" checked> Document</label>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="btnApply" class="btn">適用 / Apply</button>
+      <button id="btnClear" class="btn">解除 / Clear</button>
+    </div>
+    <div class="legend">
+      <div class="item"><span class="dot" style="background:#fe001a"></span> System</div>
+      <div class="item"><span class="dot" style="background:#00c2ff"></span> Dataset</div>
+      <div class="item"><span class="dot" style="background:#9b59b6"></span> Document</div>
+    </div>
+    <div class="muted">
+      使い方：<br/>
+      ・「接続モード」ON → ソースノードクリック → ターゲットノードクリックで作成（サイクルは自動拒否）<br/>
+      ・ノード/エッジ選択→Deleteキーで削除<br/>
+      ・保存/読込はブラウザ（localStorage）に保存<br/>
+      ・真っ白な場合は「ハードリセット」を押してからお試しください
+    </div>
+  </section>
+
+  <section class="panel" id="stageWrap">
+    <svg id="stage" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid meet"></svg>
+  </section>
+
+  <section class="panel">
+    <h2 style="margin:0 0 8px">詳細 / Details</h2>
+    <div id="details" class="muted">ノードまたはエッジを選択してください。</div>
+    <hr style="border-color:#2a3142;margin:10px 0">
+    <h2 style="margin:0 0 8px">履歴 / History</h2>
+    <div id="log" class="log"></div>
+    <div class="muted" id="stat"></div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+/* ====== ユーティリティ ====== */
+const $ = s=>document.querySelector(s);
+const stage = $('#stage');
+const logBox = $('#log');
+function nowStr(){ return new Date().toLocaleString(); }
+function user(){ return $('#userName').value?.trim() || 'anonymous'; }
+function pushLog(msg){ logBox.textContent = `[${nowStr()}] ${user()}: ${msg}\n` + logBox.textContent; }
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.style.display='block'; setTimeout(()=>t.style.display='none',2600); }
+function onError(msg,src,ln,col,err){ toast('エラー: '+msg); pushLog('ERROR: '+msg); console.error(msg,src,ln,col,err); }
+window.onerror = onError;
+
+/* ====== モデル ====== */
+const TYPE_COLOR = { System:'#fe001a', Dataset:'#00c2ff', Document:'#9b59b6' };
+const NODE_W = 160, NODE_H = 46, RADIUS = 10;
+
+let state = {
+  nodes: [],   // {id,label,type,url,tags:[],x,y}
+  edges: [],   // {id,source,target,rel:'DEPENDS_ON'|'DERIVES_FROM'|'REFERS_TO'}
+  selected: null, // {kind:'node'|'edge', id}
+  filter: { q:'', types:new Set(['System','Dataset','Document']) },
+  connectMode: false,
+  connectSourceId: null
+};
+
+const LS_KEY = 'dep-editor-offline-v2';
+
+/* ====== サンプル ====== */
+function sampleData(){
+  return {
+    nodes: [
+      {id:'sysA',label:'System A',type:'System',url:'https://contoso.sharepoint.com/sites/docs/SystemA',tags:['core','prod'],x:120,y:160},
+      {id:'sysB',label:'System B',type:'System',url:'',tags:['etl'],x:120,y:260},
+      {id:'sysC',label:'System C',type:'System',url:'',tags:['batch'],x:120,y:360},
+      {id:'sysD',label:'System D',type:'System',url:'',tags:['api'],x:120,y:460},
+      {id:'dsX',label:'Dataset X',type:'Dataset',url:'https://contoso.sharepoint.com/sites/data/DatasetX',tags:['raw'],x:440,y:200},
+      {id:'dsY',label:'Dataset Y',type:'Dataset',url:'',tags:['curated'],x:720,y:200},
+      {id:'dsZ',label:'Dataset Z',type:'Dataset',url:'',tags:['prod'],x:980,y:260},
+      {id:'doc1',label:'Spec v1',type:'Document',url:'https://contoso.sharepoint.com/sites/docs/SpecV1.pdf',tags:['spec'],x:120,y:60},
+      {id:'doc2',label:'Change Req #42',type:'Document',url:'https://contoso.sharepoint.com/sites/docs/CR42',tags:['impact'],x:440,y:60},
+      {id:'doc3',label:'P&ID-101',type:'Document',url:'',tags:['P&ID'],x:980,y:60},
+    ],
+    edges: [
+      {id:'e1',source:'sysA',target:'dsX',rel:'DEPENDS_ON'},
+      {id:'e2',source:'sysB',target:'dsX',rel:'DEPENDS_ON'},
+      {id:'e3',source:'dsX',target:'dsY',rel:'DERIVES_FROM'},
+      {id:'e4',source:'sysC',target:'dsZ',rel:'DEPENDS_ON'},
+      {id:'e5',source:'doc1',target:'sysA',rel:'REFERS_TO'},
+      {id:'e6',source:'doc2',target:'dsY',rel:'REFERS_TO'},
+      {id:'e7',source:'sysD',target:'sysA',rel:'DEPENDS_ON'},
+      {id:'e8',source:'dsY',target:'dsZ',rel:'DERIVES_FROM'}
+    ]
+  };
+}
+
+/* ====== 永続化 ====== */
+function saveLS(){
+  localStorage.setItem(LS_KEY, JSON.stringify({nodes:state.nodes, edges:state.edges}));
+  toast('保存しました / Saved'); pushLog('状態を保存');
+}
+function loadLS(){
+  const raw = localStorage.getItem(LS_KEY);
+  if(!raw) return null;
+  try{ return JSON.parse(raw); }catch{ return null; }
+}
+function hardReset(){
+  localStorage.removeItem(LS_KEY);
+  const dat = sampleData();
+  state.nodes = dat.nodes; state.edges = dat.edges; state.selected=null;
+  render(); autoLayout(); pushLog('ハードリセット：サンプルに戻しました');
+}
+
+/* ====== ヘルパ ====== */
+const byId = (arr,id)=>arr.find(x=>x.id===id);
+function hasEdge(s,t){ return state.edges.some(e=>e.source===s && e.target===t); }
+function isReachable(fromId, toId){
+  const adj = new Map();
+  state.nodes.forEach(n=> adj.set(n.id, []));
+  state.edges.forEach(e=> adj.get(e.source)?.push(e.target));
+  const seen = new Set([fromId]);
+  const st = [fromId];
+  while(st.length){
+    const cur = st.pop();
+    if(cur === toId) return true;
+    for(const nxt of (adj.get(cur)||[])){
+      if(!seen.has(nxt)){ seen.add(nxt); st.push(nxt); }
+    }
+  }
+  return false;
+}
+function addEdgeSafe(sourceId, targetId){
+  if(sourceId===targetId){ toast('自己ループは禁止 / Self-loop not allowed'); return false; }
+  if(!byId(state.nodes, sourceId) || !byId(state.nodes, targetId)){ toast('ノードが見つかりません'); return false; }
+  if(hasEdge(sourceId,targetId)){ toast('重複エッジ / Duplicate edge'); return false; }
+  if(isReachable(targetId, sourceId)){ toast('サイクルになるため接続できません / Cycle would be created'); return false; }
+  const id = 'e_'+Math.random().toString(36).slice(2,9);
+  state.edges.push({id,source:sourceId,target:targetId,rel:'DEPENDS_ON'});
+  pushLog(`Edge added: ${sourceId} -> ${targetId}`);
+  render();
+  return true;
+}
+function deleteSelected(){
+  if(!state.selected) return;
+  const {kind, id} = state.selected;
+  if(kind==='node'){
+    state.edges = state.edges.filter(e=> e.source!==id && e.target!==id);
+    state.nodes = state.nodes.filter(x=> x.id!==id);
+    pushLog(`Node deleted: ${id}`);
+  }else{
+    const e = byId(state.edges, id);
+    state.edges = state.edges.filter(x=> x.id!==id);
+    pushLog(`Edge deleted: ${id}${e?` (${e.source} -> ${e.target})`:''}`);
+  }
+  state.selected = null; render();
+}
+
+/* ====== 簡易DAGレイアウト ====== */
+function autoLayout(){
+  const nodes = state.nodes.slice();
+  const inAdj = new Map(nodes.map(n=>[n.id,[]]));
+  const outAdj = new Map(nodes.map(n=>[n.id,[]]));
+  state.edges.forEach(e=>{
+    if(inAdj.has(e.target)) inAdj.get(e.target).push(e.source);
+    if(outAdj.has(e.source)) outAdj.get(e.source).push(e.target);
+  });
+  const indeg = new Map(nodes.map(n=>[n.id,0]));
+  state.edges.forEach(e=> indeg.set(e.target, (indeg.get(e.target)||0)+1));
+  const q = nodes.filter(n=>(indeg.get(n.id)||0)===0).map(n=>n.id);
+  const order = [];
+  while(q.length){
+    const u = q.shift(); order.push(u);
+    for(const v of (outAdj.get(u)||[])){
+      indeg.set(v, (indeg.get(v)||0)-1);
+      if((indeg.get(v)||0)===0) q.push(v);
+    }
+  }
+  if(order.length !== nodes.length){
+    toast('⚠ サイクルがあるため完全なDAGレイアウトはできません'); // 通常は追加時に拒否しているのでここは通りにくい
+  }
+  const rank = new Map(nodes.map(n=>[n.id,0]));
+  for(const u of order){
+    let r = 0; for(const p of (inAdj.get(u)||[])) r = Math.max(r, (rank.get(p)||0)+1);
+    rank.set(u,r);
+  }
+  const groups = new Map();
+  for(const n of nodes){
+    const r = rank.get(n.id)||0;
+    if(!groups.has(r)) groups.set(r,[]);
+    groups.get(r).push(n.id);
+  }
+  const colW = NODE_W + 140, rowH = NODE_H + 50;
+  groups.forEach((ids, r)=>{
+    const x = 80 + r*colW;
+    ids.forEach((id, i)=>{
+      const y = 80 + i*rowH;
+      const n = byId(state.nodes, id);
+      n.x = x; n.y = y;
+    });
+  });
+  render(); pushLog('オートレイアウト実行');
+}
+
+/* ====== フィルタ ====== */
+function applyFilter(){
+  const q = $('#q').value.trim().toLowerCase();
+  const types = new Set(Array.from(document.querySelectorAll('.typechk'))
+    .filter(cb=>cb.checked).map(cb=>cb.value));
+  state.filter = { q, types };
+  render();
+}
+function matchFilter(n){
+  if(!state.filter.types.has(n.type)) return false;
+  if(!state.filter.q) return true;
+  const q = state.filter.q;
+  const inName = (n.label||'').toLowerCase().includes(q);
+  const inTags = (n.tags||[]).some(t=>(t||'').toLowerCase().includes(q));
+  return inName || inTags;
+}
+
+/* ====== SVG描画 ====== */
+function clearStage(){ while(stage.firstChild) stage.removeChild(stage.firstChild); }
+function ensureDefs(){
+  const defs = document.createElementNS('http://www.w3.org/2000/svg','defs');
+  const marker = document.createElementNS('http://www.w3.org/2000/svg','marker');
+  marker.setAttribute('id','arrow');
+  marker.setAttribute('markerWidth','10');
+  marker.setAttribute('markerHeight','10');
+  marker.setAttribute('refX','10');
+  marker.setAttribute('refY','3');
+  marker.setAttribute('orient','auto');
+  const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+  path.setAttribute('d','M0,0 L10,3 L0,6 Z');
+  path.setAttribute('fill', '#7aa2ff');
+  marker.appendChild(path);
+  defs.appendChild(marker);
+  stage.appendChild(defs);
+}
+function drawEdge(e, selectedId, visSet){
+  const s = byId(state.nodes, e.source);
+  const t = byId(state.nodes, e.target);
+  if(!s || !t) return;
+  if(visSet && (!visSet.has(s.id) || !visSet.has(t.id))) return;
+  const line = document.createElementNS('http://www.w3.org/2000/svg','line');
+  line.setAttribute('x1', s.x + NODE_W/2);
+  line.setAttribute('y1', s.y + NODE_H/2);
+  line.setAttribute('x2', t.x + NODE_W/2);
+  line.setAttribute('y2', t.y + NODE_H/2);
+  line.setAttribute('stroke', e.rel==='REFERS_TO' ? '#c0a4e0' : '#7aa2ff');
+  line.setAttribute('stroke-width', '2');
+  if(e.rel!=='REFERS_TO') line.setAttribute('marker-end', 'url(#arrow)');
+  line.classList.add('edge'); if(selectedId===e.id) line.classList.add('selected');
+  line.addEventListener('click', (evt)=>{
+    evt.stopPropagation();
+    state.selected = {kind:'edge', id:e.id};
+    renderDetails(); render();
+  });
+  stage.appendChild(line);
+}
+function drawNode(n, selectedId, visSet){
+  if(visSet && !visSet.has(n.id)) return;
+  const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+  g.classList.add('node'); if(selectedId===n.id) g.classList.add('selected');
+  g.setAttribute('transform', `translate(${n.x},${n.y})`);
+  g.setAttribute('data-id', n.id);
+  const rect = document.createElementNS('http://www.w3.org/2000/svg','rect');
+  rect.setAttribute('width', NODE_W); rect.setAttribute('height', NODE_H);
+  rect.setAttribute('rx', n.type==='Document'? 4 : RADIUS); rect.setAttribute('ry', n.type==='Document'? 4 : RADIUS);
+  rect.setAttribute('fill', TYPE_COLOR[n.type]||'#7f8c8d'); rect.setAttribute('stroke','#0b0d11'); rect.setAttribute('stroke-width','2');
+  const text = document.createElementNS('http://www.w3.org/2000/svg','text');
+  text.setAttribute('x', NODE_W/2); text.setAttribute('y', NODE_H/2 + 4);
+  text.setAttribute('text-anchor', 'middle'); text.setAttribute('fill', '#fff'); text.setAttribute('font-size','12');
+  text.textContent = n.label || n.id;
+  g.appendChild(rect); g.appendChild(text);
+  // ドラッグ
+  g.addEventListener('mousedown', onNodeDragStart);
+  // 選択/接続
+  g.addEventListener('click', (evt)=>{
+    evt.stopPropagation();
+    if(state.connectMode){
+      if(!state.connectSourceId){
+        state.connectSourceId = n.id; pushLog(`接続モード: ソース選択 ${n.id}`); toast(`ソース: ${n.label} → ターゲットをクリック`);
+      }else{
+        const s = state.connectSourceId, t = n.id; state.connectSourceId = null; addEdgeSafe(s,t);
+      }
+    }else{
+      state.selected = {kind:'node', id:n.id}; renderDetails(); render();
+    }
+  });
+  stage.appendChild(g);
+}
+function render(){
+  clearStage(); ensureDefs();
+  // 可視ノード判定
+  const vis = new Set(); state.nodes.forEach(n=>{ if(matchFilter(n)) vis.add(n.id); });
+  // エッジ→ノードの順で描画（エッジを背面に）
+  const selId = state.selected?.id;
+  drawStats();
+  state.edges.forEach(e=> drawEdge(e, state.selected?.kind==='edge' ? selId : null, vis));
+  state.nodes.forEach(n=> drawNode(n, state.selected?.kind==='node' ? selId : null, vis));
+}
+function drawStats(){
+  const s = $('#stat');
+  s.textContent = `Nodes: ${state.nodes.length} / Edges: ${state.edges.length}`;
+}
+
+/* ====== ノードドラッグ ====== */
+let drag = null;
+function getMousePos(evt){
+  const pt = stage.createSVGPoint(); pt.x = evt.clientX; pt.y = evt.clientY;
+  const ctm = stage.getScreenCTM(); if(!ctm) return {x:evt.clientX,y:evt.clientY};
+  const inv = ctm.inverse(); const sp = pt.matrixTransform(inv);
+  return {x:sp.x, y:sp.y};
+}
+function onNodeDragStart(evt){
+  const g = evt.currentTarget;
+  const id = g.getAttribute('data-id');
+  state.selected = {kind:'node', id};
+  renderDetails();
+  const n = byId(state.nodes, id);
+  const m = getMousePos(evt);
+  drag = { id, dx: m.x - n.x, dy: m.y - n.y };
+  document.addEventListener('mousemove', onNodeDragMove);
+  document.addEventListener('mouseup', onNodeDragEnd);
+}
+function onNodeDragMove(evt){
+  if(!drag) return;
+  const n = byId(state.nodes, drag.id);
+  const m = getMousePos(evt);
+  n.x = m.x - drag.dx; n.y = m.y - drag.dy;
+  render();
+}
+function onNodeDragEnd(){
+  drag = null;
+  document.removeEventListener('mousemove', onNodeDragMove);
+  document.removeEventListener('mouseup', onNodeDragEnd);
+}
+
+/* ====== 詳細パネル ====== */
+function renderDetails(){
+  const box = $('#details');
+  if(!state.selected){ box.innerHTML = '<span class="muted">ノードまたはエッジを選択してください。</span>'; return; }
+  const sel = state.selected;
+  if(sel.kind==='node'){
+    const n = byId(state.nodes, sel.id); if(!n) return;
+    box.innerHTML = `
+      <div class="kv"><b>ID</b>: ${n.id}</div>
+      <div class="kv"><b>Name</b>: <input id="fName" type="text" value="${escapeHtml(n.label||'')}"></div>
+      <div class="kv"><b>Type</b>:
+        <select id="fType">
+          <option ${n.type==='System'?'selected':''}>System</option>
+          <option ${n.type==='Dataset'?'selected':''}>Dataset</option>
+          <option ${n.type==='Document'?'selected':''}>Document</option>
+        </select>
+      </div>
+      <div class="kv"><b>URL</b>: <input id="fUrl" type="text" value="${escapeHtml(n.url||'')}">
+        ${n.url?`${escapeHtml(n.url)}開く</a>`:'<span class="muted">未設定</span>'}
+      </div>
+      <div class="kv"><b>Tags</b>: <input id="fTags" type="text" value="${escapeHtml((n.tags||[]).join(','))}"></div>
+      <div class="row" style="margin-top:8px">
+        <button id="btnUpdate" class="btn brand">更新 / Update</button>
+        <button id="btnDeleteNode" class="btn">ノード削除 / Delete</button>
+      </div>
+      <div class="muted">※ ノード削除で該当接続も削除されます</div>
+    `;
+    $('#btnUpdate').onclick = ()=>{
+      n.label = $('#fName').value.trim() || n.label;
+      n.type  = $('#fType').value;
+      n.url   = $('#fUrl').value.trim();
+      n.tags  = $('#fTags').value.split(',').map(s=>s.trim()).filter(Boolean);
+      pushLog(`Node updated: ${n.id}`); render(); renderDetails();
+    };
+    $('#btnDeleteNode').onclick = ()=> deleteSelected();
+  }else{
+    const e = byId(state.edges, sel.id); if(!e) return;
+    box.innerHTML = `
+      <div class="kv"><b>ID</b>: ${e.id}</div>
+      <div class="kv"><b>From</b>: ${e.source}</div>
+      <div class="kv"><b>To</b>: ${e.target}</div>
+      <div class="kv"><b>Rel</b>: ${e.rel||'DEPENDS_ON'}</div>
+      <div class="row" style="margin-top:8px">
+        <button id="btnDeleteEdge" class="btn">エッジ削除 / Delete</button>
+      </div>
+    `;
+    $('#btnDeleteEdge').onclick = ()=> deleteSelected();
+  }
+}
+function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+/* ====== イベント ====== */
+$('#btnConnect').onclick = ()=>{
+  state.connectMode = !state.connectMode;
+  state.connectSourceId = null;
+  $('#btnConnect').classList.toggle('on', state.connectMode);
+  toast(state.connectMode ? '接続モードON: ソース→ターゲットをクリック' : '接続モードOFF');
+};
+$('#btnLayout').onclick = autoLayout;
+$('#btnAddSample').onclick = ()=>{
+  const dat = sampleData();
+  // 既存IDと重複しないように、必要ならIDにサフィックスを追加
+  const idSet = new Set(state.nodes.map(n=>n.id).concat(state.edges.map(e=>e.id)));
+  const mapId = new Map();
+  dat.nodes.forEach(n=>{
+    let id = n.id; while(idSet.has(id)) id = id + '_' + Math.random().toString(36).slice(2,5);
+    mapId.set(n.id,id); idSet.add(id); n.id = id;
+  });
+  dat.edges.forEach(e=>{
+    e.source = mapId.get(e.source) || e.source;
+    e.target = mapId.get(e.target) || e.target;
+    let id = e.id; while(idSet.has(id)) id = id + '_' + Math.random().toString(36).slice(2,5);
+    e.id = id; idSet.add(id);
+  });
+  state.nodes = state.nodes.concat(dat.nodes);
+  state.edges = state.edges.concat(dat.edges);
+  render(); autoLayout(); pushLog('サンプルを追加');
+};
+$('#btnSave').onclick = saveLS;
+$('#btnLoad').onclick = ()=>{
+  const dat = loadLS();
+  if(dat && Array.isArray(dat.nodes) && Array.isArray(dat.edges) && dat.nodes.length>0){
+    state.nodes = dat.nodes; state.edges = dat.edges; state.selected=null;
+    render(); pushLog('状態を読み込み'); toast('読込完了 / Loaded');
+  }else{
+    toast('保存データが空か不正です。サンプルを表示します'); const d = sampleData(); state.nodes=d.nodes; state.edges=d.edges; render(); autoLayout();
+  }
+};
+$('#btnHardReset').onclick = ()=>{
+  if(confirm('保存データを削除し、サンプルに戻します。よろしいですか？')){
+    hardReset();
+  }
+};
+$('#btnApply').onclick = applyFilter;
+$('#btnClear').onclick = ()=>{ $('#q').value=''; document.querySelectorAll('.typechk').forEach(cb=>cb.checked=true); applyFilter(); };
+stage.addEventListener('click', ()=>{ state.selected = null; renderDetails(); render(); });
+document.addEventListener('keydown', e=>{
+  if(e.key==='Delete' || e.key==='Backspace'){
+    if(state.selected){ deleteSelected(); }
+  }
+});
+
+/* ====== 初期化 ====== */
+(function init(){
+  try{
+    const dat = loadLS();
+    if(dat && Array.isArray(dat.nodes) && Array.isArray(dat.edges) && dat.nodes.length>0){
+      state.nodes = dat.nodes; state.edges = dat.edges;
+      pushLog('保存データから起動'); render();
+    }else{
+      const s = sampleData();
+      state.nodes = s.nodes; state.edges = s.edges;
+      pushLog('サンプルから起動'); render(); autoLayout();
+    }
+  }catch(e){
+    onError('初期化で例外発生: '+e.message);
+    const s = sampleData();
+    state.nodes = s.nodes; state.edges = s.edges;
+    render(); autoLayout();
+  }
+})();
+</script>
+</body>
+</html>
