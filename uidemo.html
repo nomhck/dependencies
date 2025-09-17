@@ -1,0 +1,753 @@
+from IPython.display import HTML, display
+
+html = r'''
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DAG Linker v7.1 – Refactored (Colab Offline)</title>
+<style>
+  /* ===== Theme (変数) ===== */ /* カラーパレットや共通数値をCSS変数で集中管理 */
+  :root{ /* ルートスコープに変数を定義 */
+    --bg:#f7f7f9; /* ページ背景の薄いグレー */
+    --panel:#fff; /* カード/ヘッダの背景（白） */
+    --text:#222; /* 主要テキストの濃いグレー */
+    --muted:#666; /* 補助テキストのやや薄いグレー */
+    --accent:#2d7ff9; /* 強調色（青） */
+    --danger:#d94a4a; /* 危険操作用（赤） */
+    --ok:#2e8b57; /* 成功用（緑） */
+    --border:#e3e3e8; /* 枠線の薄いグレー */
+    --chip-parent:#e8f1ff; /* 親チップの背景（淡いブルー） */
+    --chip-child:#e9fff1; /* 子チップの背景（淡いグリーン） */
+    --chip-edit:#fff8e6; /* 編集行の背景（淡いイエロー） */
+  } /* :root 終わり */
+
+  /* ===== Layout（ページ全体） ===== */ /* ページ全体の構造 */
+  html, body{height:100%;} /* ビューポート全高を確保 */
+  body{margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; display:flex; flex-direction:column;} /* ベーススタイル */
+
+  header{background:var(--panel); border-bottom:1px solid var(--border); padding:10px 16px; display:grid; grid-template-columns:1fr auto; gap:10px; align-items:center;} /* ヘッダ行（タイトル/ツールバー） */
+  .title{font-weight:700;} /* タイトル強調 */
+  .toolbar{display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end;} /* ツールバー（右寄せ） */
+  .toolbar input[type="text"]{padding:6px 8px; border:1px solid var(--border); border-radius:6px; min-width:180px;} /* 検索欄の見た目 */
+  .toolbar button, .toolbar label.button{padding:8px 10px; border:1px solid var(--border); background:var(--panel); border-radius:8px; cursor:pointer;} /* ボタン基本 */
+  .toolbar button.primary{background:var(--accent); color:#fff; border-color:var(--accent);} /* 主要アクションボタン */
+  .toolbar button.danger{background:var(--danger); color:#fff; border-color:var(--danger);} /* 危険アクションボタン */
+  .toolbar input[type="file"]{display:none;} /* file入力はラベルから操作するため非表示 */
+
+  main{display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:12px; min-height:0;} /* 2カラムのメイン領域 */
+  .card{background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:10px; min-height:0; display:flex; flex-direction:column; gap:8px;} /* カードボックス */
+  .card h2{font-size:14px; margin:0; color:var(--muted);} /* カード見出し */
+  .row{display:flex; gap:8px;} /* 横並び行 */
+  .row input[type="text"]{flex:1; padding:6px 8px; border:1px solid var(--border); border-radius:6px;} /* 入力欄共通 */
+
+  /* ===== Nodes（ノード一覧） ===== */ /* 左ペイン */
+  details.bulk{background:#fafbfc; border:1px dashed var(--border); border-radius:8px; padding:6px;} /* 一括追加の折りたたみ */
+  details.bulk textarea{width:100%; min-height:80px; font-family:ui-monospace,Consolas,Menlo,monospace; padding:8px; border:1px solid var(--border); border-radius:8px;} /* 一括追加 テキストエリア */
+  .nodes{overflow:auto; min-height:240px; border:1px dashed var(--border); border-radius:8px; padding:6px; background:#fafbfc;} /* ノード一覧コンテナ */
+  .node{ /* ノード1行の見た目 */
+    user-select:none; /* テキスト選択を防止（ドラッグの邪魔をしない） */
+    display:flex; align-items:center; justify-content:space-between; gap:8px; /* 左右配置 */
+    background:#fff; border:1px solid var(--border); border-radius:8px; padding:6px 10px; margin:6px 2px; /* 見た目 */
+    touch-action:none; /* Pointer DnDのための既定ジェスチャ抑制 */
+  } /* .node 終わり */
+  .node.hover{outline:2px dashed var(--accent); background:#eef6ff;} /* ドロップ候補のハイライト */
+  .node.selected{outline:2px solid var(--accent); background:#eef6ff;} /* クリック接続で親選択中の強調 */
+  .node .id{font-family:ui-monospace,Consolas,Menlo,monospace;} /* IDは等幅フォントで視認性向上 */
+  .node .btns{display:flex; gap:6px;} /* 行右側の操作ボタン群 */
+  .node button{background:transparent; border:1px solid var(--border); border-radius:6px; padding:2px 6px; cursor:pointer;} /* ボタン共通 */
+  .node button.del{color:var(--danger); border-color:var(--danger);} /* 削除ボタン強調 */
+  .node-rename{display:flex; gap:6px; align-items:center;} /* リネーム入力の行 */
+  .node-rename input{padding:4px 6px; border:1px solid var(--border); border-radius:6px;} /* リネーム入力欄 */
+
+  /* ===== Edges（エッジ一覧） ===== */ /* 右ペイン */
+  .edges{overflow:auto; min-height:140px; border:1px dashed var(--border); border-radius:8px; padding:6px; background:#fafbfc;} /* エッジ一覧コンテナ */
+  .edge{display:flex; align-items:center; justify-content:space-between; gap:8px; background:#fff; border:1px solid var(--border); border-radius:8px; padding:6px 10px; margin:6px 2px;} /* エッジ1行 */
+  .edge .left{display:flex; align-items:center; gap:6px;} /* 左側（P/Cチップ＋矢印） */
+  .chip{display:inline-flex; align-items:center; gap:6px; padding:2px 8px; border:1px solid var(--border); border-radius:999px; user-select:none; cursor:grab;} /* P/Cチップ */
+  .chip.parent{background:var(--chip-parent);} /* 親チップ色 */
+  .chip.child{background:var(--chip-child);} /* 子チップ色 */
+  .chip .handle{font-weight:700; color:#555;} /* P/Cラベルの見た目 */
+  .arrow{color:#999;} /* リスト上の矢印記号の色 */
+  .edge .right button{background:transparent; border:1px solid var(--border); border-radius:6px; padding:2px 6px; cursor:pointer;} /* 右側操作ボタン */
+  .edge-edit{display:flex; flex-wrap:wrap; align-items:center; gap:8px; background:var(--chip-edit); border-radius:8px; padding:6px;} /* セレクト編集行 */
+
+  /* ===== Mermaid Text（テキスト表示） ===== */ /* Mermaidソースを表示/コピー用 */
+  textarea{width:100%; min-height:120px; font-family:ui-monospace,Consolas,Menlo,monospace; padding:8px; border:1px solid var(--border); border-radius:8px;} /* テキストエリア */
+
+  /* ===== SVG Stage（一括描画エリア） ===== */ /* 下部の描画キャンバス */
+  .stage-card{grid-column:1/-1;} /* 2カラムをまたいで表示 */
+  .stage-toolbar{display:flex; flex-wrap:wrap; gap:8px;} /* 描画用ツールバー */
+  #stageWrap{border:1px dashed var(--border); border-radius:8px; background:#fff; position:relative;} /* SVGラッパー */
+  #stage{width:100%; height:520px; display:block; touch-action:none;} /* SVG要素（パン/ズームのためタッチ抑制） */
+  .toast{position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:#111; color:#fff; padding:8px 12px; border-radius:8px; opacity:0.96; font-size:14px; display:none; z-index:9999;} /* トースト */
+  .bad{background:var(--danger)!important;} /* エラー色 */
+  .good{background:var(--ok)!important;} /* 成功色 */
+  .ghost{position:fixed; pointer-events:none; z-index:9999; transform:translate(-50%,-50%); opacity:0.9;} /* ドラッグ中のゴースト表示 */
+  .ghost .chip{box-shadow:0 4px 20px rgba(0,0,0,0.15);} /* ゴーストの視認性向上 */
+</style>
+</head>
+<body>
+  <header>
+    <div class="title">DAG Linker v7.1 – 親→子（Pointer/クリック）・付け替え・リネーム・Mermaid・SVG描画</div>
+    <div class="toolbar">
+      <input id="filter" type="text" placeholder="ノード検索（例: S, A01）" />
+      <button id="btnTopo">トポロジカル順序</button>
+      <button id="btnMermaid" class="primary">Mermaidをコピー</button>
+      <button id="btnDownload">JSONダウンロード</button>
+      <label for="fileJson" class="button">JSONインポート</label><input id="fileJson" type="file" accept="application/json" />
+      <button id="btnCsvDown">CSVダウンロード</button>
+      <label for="fileCsv" class="button">CSVインポート</label><input id="fileCsv" type="file" accept=".csv,text/csv" />
+      <button id="btnClear" class="danger">全消去</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>ノード</h2>
+      <div class="row">
+        <input id="newNode" type="text" placeholder="ノードID（例: S, A01）" />
+        <button id="btnAdd">ノード追加</button>
+      </div>
+      <details class="bulk">
+        <summary>一括追加（改行区切りでIDをペースト）</summary>
+        <textarea id="bulk"></textarea>
+        <div class="row"><button id="btnBulkAdd">一括追加する</button></div>
+      </details>
+      <div class="hint">
+        依存追加：<strong>親ノードをドラッグ→子ノードへドロップ（Pointer）</strong> / <strong>親をクリック→子をクリック</strong><br/>自己ループ・重複・サイクルは自動拒否
+      </div>
+      <div id="nodes" class="nodes"></div>
+    </section>
+
+    <section class="card">
+      <h2>依存関係（親 → 子）</h2>
+      <div id="edges" class="edges"></div>
+      <h2>Mermaid（graph LR / IDのみ表示）</h2>
+      <textarea id="mermaid" readonly></textarea>
+    </section>
+
+    <section class="card stage-card">
+      <h2>一括描画（SVG・LRレイアウト）</h2>
+      <div class="stage-toolbar">
+        <button id="btnDraw" class="primary">一括描画する</button>
+        <button id="btnFit">全体にフィット</button>
+        <button id="btnSvgDown">SVGダウンロード</button>
+        <span class="hint" style="margin-left:8px;">※ 背景ドラッグでパン、ホイールでズーム</span>
+      </div>
+      <div id="stageWrap">
+        <svg id="stage" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#666"></path>
+            </marker>
+          </defs>
+          <g id="viewport" transform="translate(20,20) scale(1)">
+            <g id="gEdges"></g>
+            <g id="gNodes"></g>
+          </g>
+        </svg>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+<script>
+(()=>{"use strict"; // 厳格モード＋即時関数でスコープを閉じる（グローバル汚染防止）
+
+  /* ========== Utilities（汎用関数） ========== */
+  const $ = (s,root=document)=>root.querySelector(s); // CSSセレクタで単一要素取得
+  const $$ = (s,root=document)=>Array.from(root.querySelectorAll(s)); // CSSセレクタで要素配列取得
+
+  // ★FIX: el() を安全化（dataset/style を個別適用して例外を回避）
+  const el = (tag, props={}, ...kids)=>{ // HTML要素を構築するヘルパ
+    const n=document.createElement(tag); // 要素生成
+    if (props){ // プロパティがあれば適用
+      const {dataset, style, className, ...rest}=props; // dataset/styleを分離
+      if (className!=null) n.className = className; // classNameを安全に適用
+      if (rest && Object.keys(rest).length) Object.assign(n, rest); // 残りの通常プロパティをまとめて適用
+      if (dataset){ // datasetはDOMStringMapなので個別代入
+        for (const [k,v] of Object.entries(dataset)){
+          try { n.dataset[k]=v; } catch {} // ブラウザ差異で例外化しないようガード
+        }
+      }
+      if (style){ // styleはCSSStyleDeclarationへ個別代入
+        try { Object.assign(n.style, style); } catch {} // 同上
+      }
+    }
+    for(const k of kids) n.appendChild(typeof k==="string"? document.createTextNode(k): k); // 子の挿入（テキストはTextノード化）
+    return n; // 完成要素を返す
+  }; // el 終わり
+
+  const svgEl = (tag, attrs={})=>{ // SVG要素を作るヘルパ（名前空間付き）
+    const n=document.createElementNS("http://www.w3.org/2000/svg", tag); // SVG要素生成
+    for(const [k,v] of Object.entries(attrs)) n.setAttribute(k, v); // 属性を設定
+    return n; // 返す
+  }; // svgEl 終わり
+
+  const on = (node, type, fn, opts)=> node.addEventListener(type, fn, opts); // イベント登録のショートハンド
+
+  const toast = (msg,type="")=>{ // トースト表示（良/悪で色分け）
+    const t=$("#toast"); t.textContent=msg; t.className="toast "+type; t.style.display="block"; // 表示
+    setTimeout(()=> t.style.display="none", 2000); // 2秒で自動非表示
+  }; // toast 終わり
+
+  // グローバルエラーをトーストへ（デバッグ容易化）
+  on(window, "error", e=> toast("Error: "+(e.message||e), "bad")); // 同期エラー
+  on(window, "unhandledrejection", e=> toast("Promise: "+(e.reason && e.reason.message ? e.reason.message : e.reason), "bad")); // 非同期未捕捉
+
+  /* ========== App State（アプリ状態） ========== */
+  const App = { // 状態を1カ所に集約
+    version: 71, // バージョン（I/O互換に使用）
+    lsKey: "dag_linker_v71", // localStorageキー
+    nodes: new Set(), // ノード集合（ID文字列）
+    edges: new Set(), // エッジ集合（"u→v" キー）
+    ui: { selectedParent: null }, // クリック接続の親選択状態
+
+    key: (u,v)=> `${u}→${v}`, // エッジキー作成
+    parseKey: s=>{ const i=s.indexOf("→"); return [s.slice(0,i), s.slice(i+1)]; }, // キーを [u,v] に戻す
+    idOK: s=> /^[\w\-.]+$/.test(s||""), // IDバリデーション（英数/_/-/.）
+  }; // App 終わり
+
+  /* ========== Storage（永続化 I/O） ========== */
+  function save(){ // 状態をlocalStorageへ保存
+    try{
+      const data = { nodes:[...App.nodes], edges:[...App.edges].map(App.parseKey), meta:{tool:"dag-linker", version:App.version} }; // JSON化
+      localStorage.setItem(App.lsKey, JSON.stringify(data)); // 書き込み
+    }catch{} // Colab iframe等で失敗しても無視
+  } // save 終わり
+
+  function load(){ // localStorageから状態を復元
+    try{
+      const raw = localStorage.getItem(App.lsKey); // 読み出し
+      if(!raw) return; // なければ終了
+      const data = JSON.parse(raw); // パース
+      App.nodes = new Set(Array.isArray(data.nodes)? data.nodes: []); // ノード復元
+      App.edges = new Set((Array.isArray(data.edges)? data.edges: []).map(([u,v])=> App.key(u,v))); // エッジ復元
+    }catch{} // 壊れていても初期化で続行
+  } // load 終わり
+
+  /* ========== Graph (DAG ops)（グラフ操作） ========== */
+  function buildAdj(ignoredEdge=null){ // 隣接リストを構築（旧エッジを無視するオプション付）
+    const adj = new Map(); // id -> 子配列
+    for(const id of App.nodes) adj.set(id, []); // すべて初期化
+    for(const e of App.edges){ // 全エッジ反映
+      if(ignoredEdge && e===ignoredEdge) continue; // 無視対象なら飛ばす
+      const [u,v]=App.parseKey(e); // 分解
+      if(!adj.has(u)) adj.set(u, []); // 念のため
+      adj.get(u).push(v); // u→v 追加
+    }
+    return adj; // 返却
+  } // buildAdj 終わり
+
+  function hasPathAdj(adj, start, goal){ // 非再帰DFS：start→goal 到達判定
+    if(start===goal) return true; // 同一なら到達
+    const seen=new Set([start]), st=[start]; // 訪問済とスタック
+    while(st.length){ // 空になるまで
+      const u=st.pop(); // 末尾から取り出し
+      for(const v of (adj.get(u)||[])){ // 子を走査
+        if(v===goal) return true; // 到達
+        if(!seen.has(v)){ seen.add(v); st.push(v); } // 未訪問なら記録して積む
+      }
+    }
+    return false; // 到達不能
+  } // hasPathAdj 終わり
+
+  const hasPath = (s,g)=> hasPathAdj(buildAdj(), s, g); // 現在グラフでの到達判定
+
+  function addNode(id){ // ノード追加
+    id=(id||"").trim(); // 空白除去
+    if(!id) return toast("IDが空です","bad"); // 空NG
+    if(!App.idOK(id)) return toast("IDは英数・_・-・. のみ","bad"); // 形式NG
+    if(App.nodes.has(id)) return toast("すでに存在するIDです","bad"); // 重複NG
+    App.nodes.add(id); save(); renderAll(); // 追加→保存→再描画
+  } // addNode 終わり
+
+  function renameNode(oldId, newId){ // ノード名変更（エッジへ伝播）
+    newId=(newId||"").trim(); // 空白除去
+    if(!App.idOK(newId)) return toast("IDは英数・_・-・. のみ","bad"); // 形式NG
+    if(App.nodes.has(newId)) return toast("同じIDがすでに存在します","bad"); // 重複NG
+    if(!App.nodes.has(oldId)) return toast("対象ノードが見つかりません","bad"); // 存在NG
+    App.nodes.delete(oldId); App.nodes.add(newId); // 置換
+    const next = new Set(); // 新しいエッジ集合
+    for(const e of App.edges){ // 全エッジを置換
+      let [u,v] = App.parseKey(e); // 分解
+      if(u===oldId) u=newId; // 親側置換
+      if(v===oldId) v=newId; // 子側置換
+      if(u!==v) next.add(App.key(u,v)); // 念のため自己ループは除外
+    }
+    App.edges = next; // 反映
+    if(App.ui.selectedParent===oldId) App.ui.selectedParent=newId; // 親選択状態も同期
+    save(); renderAll(); toast(`ノード名を ${oldId} → ${newId} に変更`,"good"); // 通知
+  } // renameNode 終わり
+
+  function removeNode(id){ // ノード削除（関連エッジも削除）
+    if(!App.nodes.has(id)) return; // 無ければ何もしない
+    App.nodes.delete(id); // ノード削除
+    for(const e of [...App.edges]){ // エッジを走査
+      const [u,v]=App.parseKey(e); // 分解
+      if(u===id || v===id) App.edges.delete(e); // 端点に含むエッジを削除
+    }
+    save(); renderAll(); // 保存→再描画
+  } // removeNode 終わり
+
+  function addEdge(u,v){ // エッジ追加（DAG保証）
+    if(u===v) return toast("自己ループは不可","bad"); // 自己ループ禁止
+    if(!App.nodes.has(u) || !App.nodes.has(v)) return; // 不明なIDなら何もしない
+    const k=App.key(u,v); // キー作成
+    if(App.edges.has(k)) return toast("重複エッジです","bad"); // 重複禁止
+    if(hasPath(v,u)) return toast("サイクルになるため追加できません","bad"); // v→…→u があるとサイクル
+    App.edges.add(k); save(); renderAll(); toast(`${u} → ${v} を追加`,"good"); // 追加→保存→再描画→通知
+  } // addEdge 終わり
+
+  function removeEdge(u,v){ App.edges.delete(App.key(u,v)); save(); renderAll(); } // エッジ削除
+
+  function editEdge(oldU,oldV,newU,newV){ // 既存エッジの付け替え
+    const oldK=App.key(oldU,oldV), newK=App.key(newU,newV); // 旧/新キー
+    if(!App.edges.has(oldK)) return toast("対象エッジが見つかりません","bad"); // 旧が無い
+    if(!App.nodes.has(newU)||!App.nodes.has(newV)) return toast("ノードが存在しません","bad"); // ノード存在
+    if(newU===newV) return toast("自己ループは不可","bad"); // 自己ループ禁止
+    if(newK===oldK) return renderAll(); // 変更なし
+    if(App.edges.has(newK)) return toast("重複エッジです","bad"); // 重複禁止
+    const adj = buildAdj(oldK); // 旧エッジを無視した隣接リスト
+    if(hasPathAdj(adj, newV, newU)) return toast("サイクルになるため適用不可","bad"); // サイクルチェック
+    App.edges.delete(oldK); App.edges.add(newK); save(); renderAll(); // 置換→保存→描画
+    toast(`更新: ${oldU}→${oldV} → ${newU}→${newV}`,"good"); // 通知
+  } // editEdge 終わり
+
+  function topoSort(){ // Kahn法トポロジカルソート
+    const adj=buildAdj(); // 隣接リスト
+    const indeg=new Map(); for(const n of App.nodes) indeg.set(n,0); // 入次数を0で初期化
+    for(const [u,outs] of adj) for(const v of outs) indeg.set(v,(indeg.get(v)||0)+1); // 入次数を加算
+    const q=[], ord=[]; // キューと結果
+    for(const [n,d] of indeg) if(d===0) q.push(n); // 入次数0を投入
+    while(q.length){ // キュー処理
+      const u=q.shift(); ord.push(u); // 取り出し
+      for(const v of (adj.get(u)||[])){ // 子の入次数を減らす
+        indeg.set(v,indeg.get(v)-1); if(indeg.get(v)===0) q.push(v); // 0になれば投入
+      }
+    }
+    return (ord.length===App.nodes.size)? ord: null; // 全ノードが出たらDAG
+  } // topoSort 終わり
+
+  /* ========== Mermaid（テキスト生成） ========== */
+  function toMermaid(){ // Mermaid（graph LR）を出力
+    const lines=["graph LR"], seen=new Set(); // 先頭行＋登場ノード集合
+    for(const e of App.edges){ const [u,v]=App.parseKey(e); lines.push(`  ${u} --> ${v}`); seen.add(u); seen.add(v); } // エッジ列挙
+    for(const n of App.nodes) if(!seen.has(n)) lines.push(`  ${n}["${n}"]`); // 孤立ノードも出力
+    return lines.join("\n"); // 改行結合
+  } // toMermaid 終わり
+
+  /* ========== CSV I/O ========== */
+  function csvEscape(x){ return /[",\n]/.test(x)? `"${x.replace(/"/g,'""')}"` : x; } // CSVセルのクォート処理
+  function edgesToCSV(){ // エッジCSV（u,v）に変換
+    const rows=[["u","v"], ...[...App.edges].map(App.parseKey)]; // ヘッダ＋データ
+    return rows.map(r=> r.map(csvEscape).join(",")).join("\n"); // CSV文字列へ
+  } // edgesToCSV 終わり
+
+  function parseCsvLine(line){ // 単行CSVパーサ（カンマ/ダブルクオート対応）
+    const out=[]; let cur="", inQ=false; // 出力・現在セル・クォート状態
+    for(let i=0;i<line.length;i++){ // 全文字走査
+      const c=line[i]; // 1文字
+      if(inQ){ // クォート内
+        if(c==='"'){ if(i+1<line.length && line[i+1]==='"'){ cur+='"'; i++; } else inQ=false; } // "" はエスケープ、それ以外は閉じる
+        else cur+=c; // それ以外は連結
+      }else{ // クォート外
+        if(c===','){ out.push(cur); cur=""; } // カンマでセル確定
+        else if(c==='"'){ inQ=true; } // クォート開始
+        else cur+=c; // 連結
+      }
+    }
+    out.push(cur); return out; // 最後のセルを追加して返す
+  } // parseCsvLine 終わり
+
+  /* ========== Pointer DnD（共通ドラッグ） ========== */
+  function makeGhost(label, text){ // ドラッグ中のゴーストを生成
+    const g=el("div",{className:"ghost"}); // コンテナ
+    const chip=el("span",{className:`chip ${label==="P"?"parent":"child"}`}, // P/Cチップ風
+      el("span",{className:"handle"}, label), // ラベル表示
+      el("span",{}, text) // 対象IDの表示
+    ); // chip 終わり
+    g.appendChild(chip); document.body.appendChild(g); return g; // 画面へ追加
+  } // makeGhost 終わり
+
+  function pickNodeAt(x,y){ // 座標直下の .node 行を取得
+    const elAt=document.elementFromPoint(x,y); // 要素取得
+    if(!elAt || !elAt.closest) return null; // 取れなければnull
+    const n=elAt.closest(".node"); // 親方向に .node を探索
+    return (n && n.dataset)? n: null; // data-id を持つ行を返す
+  } // pickNodeAt 終わり
+  // ★FIX: ghostText を引数で受け取り、常に意図したIDを表示（子要素から開始でも安定）
+  function dragToNode(startEvent, {label, onDrop, ghostText=""}){ // ノードへドロップする汎用ドラッグ
+    let ghost=null, lastHover=null, startX=startEvent.clientX, startY=startEvent.clientY, moved=false; // 状態
+    function setHover(el,on){ if(!el) return; el.classList.toggle("hover", !!on); } // ハイライト切替
+    function move(e){ // 移動中
+      if(!ghost) return; // ゴーストが無ければ何もしない
+      ghost.style.left=e.clientX+"px"; ghost.style.top=e.clientY+"px"; // ゴースト追従
+      if(!moved && Math.hypot(e.clientX-startX, e.clientY-startY)>4) moved=true; // しきい値超えでドラッグ判定
+      const t=pickNodeAt(e.clientX, e.clientY); // 直下ノード
+      if(t!==lastHover){ setHover(lastHover,false); setHover(t,true); lastHover=t; } // ハイライト更新
+    } // move 終わり
+    function key(e){ if(e.key==="Escape"){ toast("操作をキャンセルしました"); up(e, true); } } // Escでキャンセル
+    function up(e, canceled=false){ // 終了
+      if(ghost && ghost.parentNode) ghost.parentNode.removeChild(ghost); // ゴースト除去
+      setHover(lastHover,false); ghost=null; lastHover=null; // 状態クリア
+      window.removeEventListener("pointermove", move, true); // 監視解除
+      window.removeEventListener("pointerup", up, true); // 監視解除
+      window.removeEventListener("keydown", key, true); // 監視解除
+      if(!canceled){ // ドロップ処理
+        const t=pickNodeAt(e.clientX, e.clientY); // 直下ノード
+        if(t) onDrop(t.dataset.id); // コールバックへID渡し
+      }
+    } // up 終わり
+    ghost = makeGhost(label, ghostText); // P/C + ID のゴーストを作成
+    ghost.style.left=startEvent.clientX+"px"; ghost.style.top=startEvent.clientY+"px"; // 初期位置
+    window.addEventListener("pointermove", move, true); // 移動監視
+    window.addEventListener("pointerup", up, true); // 終了監視
+    window.addEventListener("keydown", key, true); // Esc監視
+    return { suppressClick: ()=> moved }; // ドラッグ後の誤クリック抑止フラグ
+  } // dragToNode 終わり
+
+  /* ========== Render Nodes & Edges（UI描画） ========== */
+  function renderNodes(){ // ノード一覧の再描画
+    const filter=($("#filter").value||"").toLowerCase(); // フィルタ文字列
+    const box=$("#nodes"); box.innerHTML=""; // コンテナ初期化
+    const frag=document.createDocumentFragment(); // まとめて差し込むためのフラグメント
+    const ids=[...App.nodes].sort((a,b)=> a.localeCompare(b,"ja")); // ID順に並べる
+    ids.forEach(id=>{ // 各IDについて
+      if(filter && !id.toLowerCase().includes(filter)) return; // フィルタ該当のみ描画
+
+      // ★FIX: dataset を el() 内で安全適用（v7.1 修正）
+      const row=el("div",{className:"node", dataset:{id}}); // data-id 付き行
+      if(App.ui.selectedParent===id) row.classList.add("selected"); // 親選択中なら強調
+
+      const left=el("span",{className:"id"}, id); // 左側：ID表示
+      const btns=el("div",{className:"btns"}); // 右側：ボタン群
+      const bRename=el("button",{title:"名前変更"}, "✎"); // リネーム
+      const bDel=el("button",{title:"ノード削除", className:"del"},"✕"); // 削除
+
+      on(bRename,"click", ()=> startRename(row, id)); // クリックでリネーム開始
+      on(bDel,"click", ()=> removeNode(id)); // クリックでノード削除
+
+      btns.appendChild(bRename); btns.appendChild(bDel); // ボタンを追加
+      row.appendChild(left); row.appendChild(btns); // 行を構成
+
+      on(row,"click", ()=>{ // クリック接続（親→子）
+        if(row._suppressClick){ row._suppressClick=false; return; } // 直前ドラッグ由来の擬似クリックを無視
+        if(App.ui.selectedParent===null){ // 親未選択 → 親選択へ
+          App.ui.selectedParent=id; row.classList.add("selected"); // 強調
+          toast(`親を選択：${id}（子をクリックで接続）`); // ガイダンス
+        }else{ // 親選択済 → 子確定
+          const p=App.ui.selectedParent; // 親ID
+          const prev=$$(".node").find(n=> n.dataset.id===p); // 以前の行
+          if(prev) prev.classList.remove("selected"); // ハイライト解除
+          App.ui.selectedParent=null; // 選択解除
+          if(p!==id) addEdge(p,id); // 親→子でエッジ追加
+        }
+      }); // クリック接続終わり
+
+      // ★FIX: ボタン上でのドラッグは無視（意図しない接続を防止）
+      on(row,"pointerdown", ev=>{ // 親→子のPointerドラッグ
+        if (ev.target.closest('button')) return; // ボタン上ならドラッグ処理をしない
+        ev.preventDefault(); // テキスト選択等を防止
+        const d=dragToNode(ev, {label:"P", ghostText:id, onDrop:(dst)=>{ if(dst && dst!==id) addEdge(id,dst); }}); // ドロップで接続
+        setTimeout(()=>{ row._suppressClick = d.suppressClick(); }, 0); // ドラッグ後の誤クリック抑止
+      }); // pointerdown 終わり
+
+      frag.appendChild(row); // 行をフラグメントへ追加
+    }); // forEach 終わり
+    box.appendChild(frag); // DOMへ反映
+  } // renderNodes 終わり
+
+  function makeChip(kind, text){ // P/CチップDOMを生成
+    return el("span",{className:`chip ${kind}`},
+      el("span",{className:"handle"}, kind==="parent"?"P":"C"), // ラベル
+      el("span",{}, text) // ID
+    ); // チップ返却
+  } // makeChip 終わり
+
+  function startEditEdge(row, oldU, oldV){ // セレクトUIでエッジ編集
+    row.innerHTML=""; // 行を初期化
+    const wrap=el("div",{className:"edge-edit"}); // 編集コンテナ
+    const selU=el("select",{}), selV=el("select",{}); // 親/子セレクト
+    const ids=[...App.nodes].sort((a,b)=> a.localeCompare(b,"ja")); // 候補一覧
+    ids.forEach(id=>{ // オプションを両方に追加
+      selU.appendChild(el("option",{value:id}, id)); // 親候補
+      selV.appendChild(el("option",{value:id}, id)); // 子候補
+    });
+    selU.value=oldU; selV.value=oldV; // 既存値を反映
+    const arrow=el("span",{className:"arrow"},"→"); // 矢印表示
+    const saveBtn=el("button",{},"保存"); // 保存ボタン
+    const cancelBtn=el("button",{},"キャンセル"); // キャンセルボタン
+    on(saveBtn,"click", ()=> editEdge(oldU,oldV, selU.value, selV.value)); // 置換適用
+    on(cancelBtn,"click", ()=> renderEdges()); // 元に戻す
+    wrap.appendChild(selU); wrap.appendChild(arrow); wrap.appendChild(selV); wrap.appendChild(saveBtn); wrap.appendChild(cancelBtn); // 構成
+    row.appendChild(wrap); // 反映
+  } // startEditEdge 終わり
+
+  function renderEdges(){ // エッジ一覧の再描画
+    const box=$("#edges"); box.innerHTML=""; // 初期化
+    const pairs=[...App.edges].map(App.parseKey).sort((a,b)=> a[0]===b[0]? a[1].localeCompare(b[1],"ja"): a[0].localeCompare(b[0],"ja")); // 親/子のID順
+    if(!pairs.length){ // 空ならヒント
+      box.appendChild(el("div",{className:"hint"},"まだ依存関係はありません。親をドラッグ→子へドロップ、または親クリック→子クリックで追加できます。")); // 案内
+      return; // 終了
+    }
+    const frag=document.createDocumentFragment(); // まとめて差し込む
+    pairs.forEach(([u,v])=>{ // 各エッジ
+      const row=el("div",{className:"edge"}); // 行
+      const left=el("div",{className:"left"}); // 左側
+      const chipU=makeChip("parent", u), chipV=makeChip("child", v), arrow=el("span",{className:"arrow"},"→"); // P/Cチップと矢印
+      left.appendChild(chipU); left.appendChild(arrow); left.appendChild(chipV); // 左側構成
+      const right=el("div",{className:"right"}); // 右側
+      const bEdit=el("button",{},"編集"), bDel=el("button",{},"削除"); bDel.style.marginLeft="6px"; // ボタン2つ
+      on(bDel,"click", ()=> removeEdge(u,v)); // エッジ削除
+      on(bEdit,"click", ()=> startEditEdge(row,u,v)); // セレクト編集へ
+      right.appendChild(bEdit); right.appendChild(bDel); // 右側構成
+      row.appendChild(left); row.appendChild(right); // 行構成
+      frag.appendChild(row); // 追加
+
+      // ★FIX: ゴーストの表示文言を明示（u/v）して安定化
+      on(chipU,"pointerdown", ev=>{ // 親差し替え
+        ev.preventDefault(); // 既定抑止
+        dragToNode(ev,{label:"P", ghostText:u, onDrop:(nid)=> editEdge(u,v, nid, v)}); // 親をnidへ
+      });
+      on(chipV,"pointerdown", ev=>{ // 子差し替え
+        ev.preventDefault(); // 既定抑止
+        dragToNode(ev,{label:"C", ghostText:v, onDrop:(nid)=> editEdge(u,v, u, nid)}); // 子をnidへ
+      });
+    }); // forEach 終わり
+    box.appendChild(frag); // 反映
+  } // renderEdges 終わり
+
+  function renderMermaid(){ $("#mermaid").value = toMermaid(); } // Mermaidテキストを更新
+  function renderAll(){ renderNodes(); renderEdges(); renderMermaid(); } // まとめて再描画
+
+  /* ========== SVG Layout & Viewer（描画とビュー操作） ========== */
+  const Viewer = (()=>{
+    const svg=$("#stage"), vp=$("#viewport"), gNodes=$("#gNodes"), gEdges=$("#gEdges"); // SVG主要要素
+    let vScale=1, vTx=20, vTy=20; // 現在の倍率と平行移動
+
+    function apply(){ vp.setAttribute("transform", `translate(${vTx},${vTy}) scale(${vScale})`); } // ビュー変換を適用
+
+    function fit(){ // ノード群が収まるように自動フィット
+      const rects=$$("rect", gNodes); // ノード矩形の一覧
+      if(!rects.length){ vScale=1; vTx=20; vTy=20; return apply(); } // 空なら初期値に戻す
+      let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity; // バウンディング計算
+      rects.forEach(r=>{
+        const x=+r.getAttribute("x"), y=+r.getAttribute("y"); // 位置
+        const w=+r.getAttribute("width"), h=+r.getAttribute("height"); // サイズ
+        minX=Math.min(minX,x); minY=Math.min(minY,y); maxX=Math.max(maxX,x+w); maxY=Math.max(maxY,y+h); // 範囲更新
+      });
+      const vb=svg.getBoundingClientRect(), pad=30; // SVGの表示サイズと余白
+      const cw=(maxX-minX)+pad*2, ch=(maxY-minY)+pad*2; // 内容サイズ
+      const sx=vb.width/cw, sy=vb.height/ch; // 倍率候補
+      vScale=Math.max(0.2, Math.min(sx, sy)); // 倍率を制限して設定
+      vTx=(vb.width - (maxX-minX)*vScale)/2 - minX*vScale; // 中央位置に平行移動X
+      vTy=(vb.height - (maxY-minY)*vScale)/2 - minY*vScale; // 平行移動Y
+      apply(); // 反映
+    } // fit 終わり
+
+    // Pan（背景ドラッグで移動）
+    (()=>{
+      let panning=false, sx=0, sy=0, stx=0, sty=0; // パン状態
+      on(svg, "pointerdown", e=>{ // パン開始
+        if(e.target && e.target.closest && (e.target.closest("#gNodes") || e.target.closest("#gEdges"))) return; // ノード/エッジ上はパンなし
+        panning=true; sx=e.clientX; sy=e.clientY; stx=vTx; sty=vTy; try{ svg.setPointerCapture(e.pointerId);}catch{} // キャプチャできる環境のみ
+      });
+      on(svg, "pointermove", e=>{ // パン中移動
+        if(!panning) return; // パン時のみ
+        vTx=stx+(e.clientX-sx); vTy=sty+(e.clientY-sy); apply(); // 平行移動して反映
+      });
+      const stop=()=> panning=false; // パン終了
+      on(svg, "pointerup", stop); on(svg, "pointercancel", stop); // 解放
+    })(); // 即時関数終わり
+
+    // Zoom（ホイールで拡大縮小：マウス位置を中心に）
+    on(svg, "wheel", e=>{
+      e.preventDefault(); // ページスクロールを抑制
+      const factor = e.deltaY>0 ? 0.9 : 1.1; // 下回し=縮小、上回し=拡大
+      const rect=svg.getBoundingClientRect(); // SVG矩形
+      const mx=e.clientX-rect.left, my=e.clientY-rect.top; // マウス位置（SVG内座標）
+      const wx=(mx - vTx)/vScale, wy=(my - vTy)/vScale; // 世界座標（中心を保つため）
+      vScale=Math.max(0.1, Math.min(4, vScale*factor)); // 倍率を更新（下限/上限）
+      vTx = mx - wx*vScale; vTy = my - wy*vScale; // 平行移動を補正
+      apply(); // 反映
+    }, {passive:false}); // preventDefaultのため passive:false
+
+    function draw(){ // SVGへ一括描画
+      gNodes.innerHTML=""; gEdges.innerHTML=""; // 既存をクリア
+      const order=topoSort(); // トポロジカル順序
+      if(!order){ toast("DAGではありません（サイクルがあります）","bad"); return; } // サイクル検知時は中断
+
+      const adj=buildAdj(), dist=new Map(order.map(n=>[n,0])); // 隣接/距離初期化
+      for(const u of order){ // トポ順に最長距離を緩和
+        const du=dist.get(u); // 現距離
+        for(const v of (adj.get(u)||[])) dist.set(v, Math.max(dist.get(v)||0, du+1)); // vの距離を最長化
+      }
+      for(const n of App.nodes) if(!dist.has(n)) dist.set(n,0); // 孤立ノードは0層
+      const layers=[]; for(const [n,d] of dist){ (layers[d] ||= []).push(n); } // 層別に配列化
+      layers.forEach(a=> a.sort((x,y)=> x.localeCompare(y,"ja"))); // 各層でID順に整列
+
+      const marginX=30, marginY=30, rankGap=220, nodeGapY=60, nodeH=36; // レイアウト定数
+      const nodeW=id=> Math.max(60, Math.min(180, 16 + 9*id.length)); // テキスト長に応じた幅
+
+      const pos=new Map(); // id -> {x,y,w,h}
+      layers.forEach((ids,r)=>{ // 層ごとに配置
+        let y=marginY; // 縦開始位置
+        ids.forEach(id=>{ // 層内で上から順に
+          const w=nodeW(id), h=nodeH, x=marginX + r*rankGap; // 位置とサイズ
+          pos.set(id,{x,y,w,h}); y+=h+nodeGapY; // 登録して次のYへ
+        });
+      }); // 配置終わり
+
+      for(const [u,v] of [...App.edges].map(App.parseKey)){ // 先にエッジ（曲線）を描画
+        const su=pos.get(u), sv=pos.get(v); if(!su || !sv) continue; // 位置なければスキップ
+        const sx=su.x+su.w, sy=su.y+su.h/2, tx=sv.x, ty=sv.y+sv.h/2; // 端点
+        const dx=Math.max(40, (tx-sx)/2); // ベジェ制御点距離
+        const d=`M${sx},${sy} C${sx+dx},${sy} ${tx-dx},${ty} ${tx},${ty}`; // 曲線パス
+        gEdges.appendChild(svgEl("path",{d, fill:"none", stroke:"#666", "stroke-width":"1.4", "marker-end":"url(#arrow)"})); // 追加
+      } // エッジ描画終わり
+
+      for(const id of App.nodes){ // ノード矩形＋テキスト
+        const p=pos.get(id); if(!p) continue; // 位置なければ飛ばす
+        const g=svgEl("g",{"data-id":id}); // グループ
+        g.appendChild(svgEl("rect",{x:p.x, y:p.y, width:p.w, height:p.h, rx:8, ry:8, fill:"#fff", stroke:"#bbb", "stroke-width":"1.2"})); // 角丸矩形
+        const t=svgEl("text",{x:p.x+p.w/2, y:p.y+p.h/2+4, "text-anchor":"middle", "font-family":"ui-monospace,Consolas,Menlo,monospace", "font-size":"12"}); // テキスト
+        t.textContent=id; g.appendChild(t); gNodes.appendChild(g); // ノード追加
+      } // ノード描画終わり
+
+      fit(); toast("SVGを描画しました","good"); // 自動フィット＆通知
+    } // draw 終わり
+
+    function download(){ // 現在のSVGをダウンロード
+      const svg=$("#stage").cloneNode(true); // SVGを複製
+      const rect=$("#stage").getBoundingClientRect(); // 表示サイズ
+      svg.setAttribute("width", Math.round(rect.width)); // 幅
+      svg.setAttribute("height", Math.round(rect.height)); // 高さ
+      const xml=new XMLSerializer().serializeToString(svg); // XML化
+      const blob=new Blob([`<?xml version="1.0" encoding="UTF-8"?>\n`+xml],{type:"image/svg+xml"}); // Blob
+      const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="dag.svg"; a.click(); URL.revokeObjectURL(a.href); // 自動保存
+    } // download 終わり
+
+    return {draw, fit, download}; // 外部に公開
+  })(); // Viewer モジュール終わり
+
+  /* ========== UI Bindings（イベント束ね） ========== */
+  function bindUI(){ // すべてのUIイベントをここで設定
+    on($("#btnAdd"), "click", ()=>{ // ノード追加ボタン
+      addNode($("#newNode").value); $("#newNode").value=""; $("#newNode").focus(); // 追加→入力クリア→フォーカス
+    }); // クリック終わり
+
+    on($("#newNode"), "keydown", e=>{ if(e.key==="Enter") $("#btnAdd").click(); }); // Enterで追加
+    on($("#filter"), "input", renderNodes); // 検索でノード描画更新
+
+    on($("#btnBulkAdd"), "click", ()=>{ // 一括追加
+      const ids=($("#bulk").value||"").split(/\r?\n/).map(s=>s.trim()).filter(Boolean); // 改行区切りを配列化
+      let add=0, skip=0; // 結果カウンタ
+      for(const id of ids){ const before=App.nodes.size; addNode(id); if(App.nodes.size>before) add++; else skip++; } // 追加
+      toast(`一括追加: ${add}件（スキップ ${skip}件）`, add? "good":""); // トースト通知
+    }); // 一括追加終わり
+
+    on($("#btnMermaid"), "click", async ()=>{ // Mermaidコピー
+      try{ await navigator.clipboard.writeText(toMermaid()); toast("Mermaidをコピーしました","good"); } // 成功
+      catch{ toast("コピーに失敗：テキストを選択して手動コピーしてください","bad"); } // 失敗
+    }); // クリック終わり
+
+    on($("#btnDownload"), "click", ()=>{ // JSONダウンロード
+      const data={ nodes:[...App.nodes], edges:[...App.edges].map(App.parseKey), meta:{tool:"dag-linker", version:App.version} }; // データ
+      try{
+        const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"}); // Blob化
+        const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="dag.json"; a.click(); URL.revokeObjectURL(a.href); // 保存
+      }catch{ toast("ダウンロード不可：MermaidやJSONを手動コピーしてください","bad"); } // エラー処理
+    }); // JSONダウンロード終わり
+
+    on($("#fileJson"), "change", async e=>{ // JSONインポート
+      const f=e.target.files[0]; if(!f) return; // 未選択
+      try{
+        const data=JSON.parse(await f.text()); // 読み込み
+        if(!Array.isArray(data.nodes)||!Array.isArray(data.edges)) return toast("JSON形式が不正です","bad"); // バリデーション
+        App.nodes=new Set(data.nodes); // ノード復元
+        App.edges=new Set(data.edges.map(([u,v])=> App.key(u,v))); // エッジ復元
+        save(); renderAll(); toast("JSONを読み込みました","good"); // 完了
+      }catch(err){ console.error(err); toast("読み込みに失敗しました","bad"); } // 例外
+      finally{ e.target.value=""; } // 同じファイルを再選択可能に
+    }); // JSONインポート終わり
+
+    on($("#btnCsvDown"), "click", ()=>{ // CSVダウンロード
+      const blob=new Blob([edgesToCSV()],{type:"text/csv"}); // Blob生成
+      const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="dag_edges.csv"; a.click(); URL.revokeObjectURL(a.href); // 保存
+    }); // CSVダウンロード終わり
+
+    on($("#fileCsv"), "change", async e=>{ // CSVインポート
+      const f=e.target.files[0]; if(!f) return; // 未選択
+      try{
+        const lines=(await f.text()).split(/\r?\n/).map(s=>s.trim()).filter(Boolean); // 行配列
+        let i=0; if(/^"?u"?\s*,\s*"?v"?/i.test(lines[0])) i=1; // ヘッダ行はスキップ
+        let added=0, skipped=0; // カウンタ
+        for(; i<lines.length; i++){ // 各行を処理
+          const parts=parseCsvLine(lines[i]); if(parts.length<2){ skipped++; continue; } // 列不足
+          const u=parts[0].trim(), v=parts[1].trim(); if(!u||!v){ skipped++; continue; } // 空セル
+          if(!App.nodes.has(u)) App.nodes.add(u); if(!App.nodes.has(v)) App.nodes.add(v); // 未登録ノードは追加
+          const before=App.edges.size; addEdge(u,v); if(App.edges.size===before) skipped++; else added++; // 追加
+        }
+        save(); renderAll(); toast(`CSVから追加: ${added}件（スキップ ${skipped}件）`,"good"); // 完了
+      }catch(err){ console.error(err); toast("CSV読み込みに失敗しました","bad"); } // 例外
+      finally{ e.target.value=""; } // リセット
+    }); // CSVインポート終わり
+
+    on($("#btnTopo"), "click", ()=>{ // トポロジカル順序の表示
+      const ord=topoSort(); // 計算
+      if(!ord) return toast("DAGではありません（サイクルがあります）","bad"); // サイクル時
+      toast("トポロジカル順序："+ord.join(" → ")); // 結果表示
+    }); // トポロジカル終わり
+
+    on($("#btnClear"), "click", ()=>{ // 全消去
+      if(!confirm("すべてのノードと依存関係を削除します。よろしいですか？")) return; // 確認
+      App.nodes.clear(); App.edges.clear(); App.ui.selectedParent=null; save(); renderAll(); // 状態クリア
+      $("#gNodes").innerHTML=""; $("#gEdges").innerHTML=""; // SVGもクリア
+    }); // 全消去終わり
+
+    on($("#btnDraw"), "click", Viewer.draw); // SVG描画
+    on($("#btnFit"), "click", Viewer.fit); // 自動フィット
+    on($("#btnSvgDown"), "click", Viewer.download); // SVGダウンロード
+  } // bindUI 終わり
+
+  /* ========== Rename UI（リネームフォーム） ========== */
+  function startRename(nodeEl, oldId){ // ノード行を編集UIへ切り替え
+    nodeEl.innerHTML=""; // 行クリア
+    const wrap=el("div",{className:"node-rename"}); // コンテナ
+    const input=el("input",{value:oldId, placeholder:"新しいID"}); // 入力欄
+    const ok=el("button",{},"保存"); // 保存ボタン
+    const cancel=el("button",{},"キャンセル"); // キャンセルボタン
+    on(ok,"click", ()=>{ // 保存クリック
+      const nv=input.value.trim(); // 新ID
+      if(!nv) return toast("IDが空です","bad"); // 空NG
+      if(!App.idOK(nv)) return toast("IDは英数・_・-・. のみ","bad"); // 形式NG
+      if(nv===oldId) return renderNodes(); // 変更なし
+      if(App.nodes.has(nv)) return toast("同じIDが存在します","bad"); // 重複NG
+      renameNode(oldId, nv); // 置換実行
+    }); // 保存終わり
+    on(cancel,"click", renderNodes); // キャンセルで元に戻す
+    on(input,"keydown", e=>{ if(e.key==="Enter") ok.click(); if(e.key==="Escape") cancel.click(); }); // Enter/Escハンドリング
+    wrap.appendChild(input); wrap.appendChild(ok); wrap.appendChild(cancel); // コンポーネント構成
+    nodeEl.appendChild(wrap); input.focus(); input.select(); // フォーカス
+  } // startRename 終わり
+
+  /* ========== Init（初期化） ========== */
+  load(); bindUI(); // 永続化から復元＆イベント紐付け
+  if(App.nodes.size===0){ // 初回はサンプル投入
+    ["S","A","B","C","D"].forEach(addNode); // ノード
+    addEdge("S","A"); addEdge("S","B"); addEdge("A","C"); addEdge("B","D"); // エッジ
+  }else{
+    renderAll(); // 既存状態を描画
+  } // 初期化分岐終わり
+
+})(); // 即時関数の終わり
+</script>
+</body>
+</html>
+'''
+
+display(HTML(html))
