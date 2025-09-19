@@ -59,6 +59,11 @@
   .hi-center { stroke:#ef4444 !important; stroke-width:2.5 !important; } /* 中心ノード */
   .hi-edge { stroke:#0ea5e9 !important; stroke-width:2 !important; opacity:0.95 !important; } /* 対象エッジ */
 </style>
+<!-- Mermaid: 自動レンダリングを導入（CDN）。ネットワーク状況で読み込みされない場合は無視されるよう安全に扱います -->
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.4.0/dist/mermaid.min.js"></script>
+<script>
+try{ if(window.mermaid) mermaid.initialize({ startOnLoad:false }); }catch(e){ console.warn('mermaid init failed', e); }
+</script>
 </head>
 <body>
   <header>
@@ -184,163 +189,206 @@
 (function(){
   /* ***************************************************************************
    * アプリ状態
+   * -------------------------------------------------------------------------
+   * state オブジェクトはアプリ全体の状態を保持します。
+   * 各フィールドの役割：
+   *  - nodes: Map を使ってノードを管理（キーは id、値は {id,label}）
+   *  - edges: Set に "親|子" のキー文字列を保持（重複防止のため）
+   *  - history: 操作履歴（Undo 用）
+   *  - future: 元に戻した操作の履歴（Redo 用）
+   *  - lastId: 自動採番のために現在の最大数値IDを保持
+   *  - direction: SVG レイアウトの方向 ('LR' 左→右 / 'TB' 上→下)
+   *  - rootHint: レイアウト時の優先ルートID（空なら自動配置）
+   *  - focus: ハイライト対象（null または {id, mode, depth}）
+   *
+   * 注：Map/Set を使うことで存在チェックや列挙が効率的に行えます。
    * ************************************************************************* */
   const state = {
     nodes: new Map(),      // id -> {id, label}
     edges: new Set(),      // "p|c"
-    history: [],           // Undo
-    future: [],            // Redo
-    lastId: 0,             // 自動採番上限
+    history: [],           // Undo 履歴を積む配列
+    future: [],            // Redo 用のスタック
+    lastId: 0,             // 自動採番のための最大数値ID
     direction: 'LR',       // 'LR' or 'TB'
-    rootHint: '',          // レイアウトルートヒント
-    // === ハイライト状態（新規） ===
-    focus: null            // { id, mode: 'both'|'up'|'down'|'one', depth: number|null }
+    rootHint: '',          // レイアウトのルートヒント
+    // ハイライト状態: null または { id, mode, depth }
+    focus: null
   };
 
-  /* ===== エッジキー/文字列変換 ===== */
+  /* ===== ユーティリティ関数群 =====
+   * - edgeKey / parseEdgeKey: edges Set 用のキー生成・分解
+   * - escapeHTML: DOM に直接挿入する文字列の簡易エスケープ
+   * - safeMermaidId / escapeMermaid: Mermaid テキスト用の ID/文字列整形
+   */
+  // 親と子を組み合わせて一意のキー文字列を作る
   const edgeKey = (p,c)=> `${p}|${c}`;
-  const parseEdgeKey = k => { const [p,c]=k.split('|'); return {p,c}; }
+  // キー文字列を {p,c} に戻す（split）
+  const parseEdgeKey = k => { const [p,c]=k.split('|'); return {p,c}; };
+  // 簡易 HTML エスケープ（表示用テキストの安全化）
   const escapeHTML = s => String(s).replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
+  // Mermaid 用の安全な ID を作る（英数字/下線のみ）
   const safeMermaidId = s => 'n' + String(s).replace(/[^a-zA-Z0-9_]/g,'_');
+  // Mermaid 内の特殊文字をエスケープ（引用符等）
   const escapeMermaid = s => String(s).replace(/(["'`\\])/g,'\\$1');
 
   /* ***************************************************************************
    * ノード操作
    * ************************************************************************* */
-  function addNodeAuto(label="", pushHistory=true) {
-    // 既存と衝突しない最大数値+1を割り当て
+  // 自動 ID 割当でノードを追加する
+  // label: ノードのラベル（任意）
+  // pushHistory: 操作履歴に記録するか
+  function addNodeAuto(label = "", pushHistory = true) {
+    // lastId を基に数値IDをインクリメントして空きIDを探す
     let n = state.lastId;
     while (true) {
       n++;
       const id = String(n);
       if (!state.nodes.has(id)) {
-        state.nodes.set(id, {id, label});
-        state.lastId = n;
-        if (pushHistory) state.history.push({type:"addNode", node:{id, label}});
-        state.future.length = 0;
+        state.nodes.set(id, { id, label });
+        state.lastId = n; // 採番上限を更新
+        if (pushHistory) state.history.push({ type: "addNode", node: { id, label } });
+        state.future.length = 0; // redo 層をクリア
         return id;
       }
     }
   }
-  function addNodeWithId(id, label="", pushHistory=true) {
+  // 指定 ID でノードを追加（手動指定）
+  function addNodeWithId(id, label = "", pushHistory = true) {
     id = String(id).trim();
-    if (!id) return {ok:false, reason:"IDが空です"};
-    if (state.nodes.has(id)) return {ok:false, reason:"同一IDが既に存在します"};
-    state.nodes.set(id, {id, label:String(label||"")});
-    const num = Number(id); if (Number.isFinite(num)) state.lastId = Math.max(state.lastId, num);
-    if (pushHistory) state.history.push({type:"addNode", node:{id, label}});
+    if (!id) return { ok: false, reason: "IDが空です" };
+    if (state.nodes.has(id)) return { ok: false, reason: "同一IDが既に存在します" };
+    state.nodes.set(id, { id, label: String(label || "") });
+    // ID が数値の場合は lastId を更新して自動採番と衝突しないようにする
+    const num = Number(id);
+    if (Number.isFinite(num)) state.lastId = Math.max(state.lastId, num);
+    if (pushHistory) state.history.push({ type: "addNode", node: { id, label } });
     state.future.length = 0;
     render();
-    return {ok:true, id};
+    return { ok: true, id };
   }
-  function removeNode(id, pushHistory=true) {
-    if (!state.nodes.has(id)) return {ok:false, reason:"ノードが存在しません"};
+  // ノード削除。関連するエッジも併せて削除する
+  function removeNode(id, pushHistory = true) {
+    if (!state.nodes.has(id)) return { ok: false, reason: "ノードが存在しません" };
     const removedEdges = [];
-    for (const k of [...state.edges]) { const {p,c}=parseEdgeKey(k); if (p===id || c===id) { state.edges.delete(k); removedEdges.push({p,c}); } }
+    // edges は Set なので、削除しながら removedEdges に記録
+    for (const k of [...state.edges]) {
+      const { p, c } = parseEdgeKey(k);
+      if (p === id || c === id) { state.edges.delete(k); removedEdges.push({ p, c }); }
+    }
     const node = state.nodes.get(id);
     state.nodes.delete(id);
-    if (pushHistory) state.history.push({type:"removeNode", node, removedEdges});
+    if (pushHistory) state.history.push({ type: "removeNode", node, removedEdges });
     state.future.length = 0;
     render();
-    return {ok:true};
+    return { ok: true };
   }
-  function renameNodeLabel(id, newLabel, pushHistory=true) {
-    const n = state.nodes.get(id); if (!n) return {ok:false, reason:"ノードが存在しません"};
-    const prev = n.label||""; n.label = String(newLabel||"");
-    if (pushHistory) state.history.push({type:"renameLabel", id, prev, next:n.label});
+  // ノードのラベルを変更
+  function renameNodeLabel(id, newLabel, pushHistory = true) {
+    const n = state.nodes.get(id);
+    if (!n) return { ok: false, reason: "ノードが存在しません" };
+    const prev = n.label || "";
+    n.label = String(newLabel || "");
+    if (pushHistory) state.history.push({ type: "renameLabel", id, prev, next: n.label });
     state.future.length = 0;
     render();
-    return {ok:true};
+    return { ok: true };
   }
 
   /* ***************************************************************************
    * DAGチェック & エッジ操作
    * ************************************************************************* */
   function buildAdj() {
-    const out = new Map([...state.nodes.keys()].map(id=>[id,new Set()]));
-    const rev = new Map([...state.nodes.keys()].map(id=>[id,new Set()])); // 逆隣接（祖先探索用）
+    // 出次数 / 逆隣接リストを構築して返す
+    const out = new Map([...state.nodes.keys()].map(id => [id, new Set()]));
+    const rev = new Map([...state.nodes.keys()].map(id => [id, new Set()])); // 逆隣接（祖先探索用）
     for (const k of state.edges) {
-      const {p,c}=parseEdgeKey(k);
-      if (!out.has(p)) out.set(p,new Set());
-      if (!rev.has(c)) rev.set(c,new Set());
+      const { p, c } = parseEdgeKey(k);
+      if (!out.has(p)) out.set(p, new Set());
+      if (!rev.has(c)) rev.set(c, new Set());
       out.get(p).add(c);
       rev.get(c).add(p);
     }
-    return {out, rev};
+    return { out, rev };
   }
   function wouldCreateCycle(parent, child) {
-    if (parent===child) return true;
-    const {out} = buildAdj();
-    if (!out.has(parent)) out.set(parent,new Set());
+    // parent==child なら即サイクル
+    if (parent === child) return true;
+    // 仮に parent->child を追加したグラフで child から parent に到達できるかを DFS で判定
+    const { out } = buildAdj();
+    if (!out.has(parent)) out.set(parent, new Set());
     out.get(parent).add(child);
-    // child→…→parent があるかDFS
     const target = parent;
     const stack = [child], seen = new Set();
     while (stack.length) {
       const v = stack.pop();
-      if (v===target) return true;
+      if (v === target) return true; // 到達したらサイクル
       if (seen.has(v)) continue;
       seen.add(v);
-      const nxt = out.get(v)||new Set();
+      const nxt = out.get(v) || new Set();
       for (const w of nxt) stack.push(w);
     }
     return false;
   }
   function addEdge(parent, child, pushHistory=true) {
+    // エッジ追加（DAG チェック・存在チェックを行う）
     const k = edgeKey(parent, child);
-    if (!state.nodes.has(parent) || !state.nodes.has(child)) return {ok:false, reason:"存在しないノードです"};
-    if (state.edges.has(k)) return {ok:false, reason:"同一の依存が既にあります"};
-    if (wouldCreateCycle(parent, child)) return {ok:false, reason:"DAG違反（サイクルが発生）"};
+    if (!state.nodes.has(parent) || !state.nodes.has(child)) return { ok: false, reason: "存在しないノードです" };
+    if (state.edges.has(k)) return { ok: false, reason: "同一の依存が既にあります" };
+    if (wouldCreateCycle(parent, child)) return { ok: false, reason: "DAG違反（サイクルが発生）" };
     state.edges.add(k);
-    if (pushHistory) state.history.push({type:"addEdge", parent, child});
+    if (pushHistory) state.history.push({ type: "addEdge", parent, child });
     state.future.length = 0;
     render();
-    return {ok:true};
+    return { ok: true };
   }
   function removeEdge(parent, child, pushHistory=true) {
     const k = edgeKey(parent, child);
-    if (!state.edges.has(k)) return {ok:false, reason:"依存が存在しません"};
+    if (!state.edges.has(k)) return { ok: false, reason: "依存が存在しません" };
     state.edges.delete(k);
-    if (pushHistory) state.history.push({type:"removeEdge", parent, child});
+    if (pushHistory) state.history.push({ type: "removeEdge", parent, child });
     state.future.length = 0;
     render();
-    return {ok:true};
+    return { ok: true };
   }
 
   /* ***************************************************************************
    * Undo / Redo
    * ************************************************************************* */
   function undo() {
+    // 直前の操作を取り出して逆操作を適用し、redo スタックに保存する
     const cmd = state.history.pop(); if (!cmd) return;
-    if (cmd.type==="addEdge") { state.edges.delete(edgeKey(cmd.parent,cmd.child)); state.future.push(cmd); }
-    else if (cmd.type==="removeEdge") { state.edges.add(edgeKey(cmd.parent,cmd.child)); state.future.push(cmd); }
-    else if (cmd.type==="addNode") {
-      const id = cmd.node.id, removedEdges=[];
-      for (const k of [...state.edges]) { const {p,c}=parseEdgeKey(k); if (p===id || c===id) { state.edges.delete(k); removedEdges.push({p,c}); } }
-      state.nodes.delete(id); state.future.push({type:"removeNode", node:cmd.node, removedEdges});
-    } else if (cmd.type==="removeNode") {
-      state.nodes.set(cmd.node.id, {id:cmd.node.id, label:cmd.node.label||""});
-      for (const e of cmd.removedEdges) state.edges.add(edgeKey(e.p,e.c));
-      state.future.push({type:"addNode", node:cmd.node});
-    } else if (cmd.type==="renameLabel") {
+    if (cmd.type === "addEdge") {
+      state.edges.delete(edgeKey(cmd.parent, cmd.child)); state.future.push(cmd);
+    } else if (cmd.type === "removeEdge") {
+      state.edges.add(edgeKey(cmd.parent, cmd.child)); state.future.push(cmd);
+    } else if (cmd.type === "addNode") {
+      // addNode の undo はノード削除（関連エッジも取り除く）
+      const id = cmd.node.id, removedEdges = [];
+      for (const k of [...state.edges]) { const { p, c } = parseEdgeKey(k); if (p === id || c === id) { state.edges.delete(k); removedEdges.push({ p, c }); } }
+      state.nodes.delete(id);
+      state.future.push({ type: "removeNode", node: cmd.node, removedEdges });
+    } else if (cmd.type === "removeNode") {
+      // removeNode の undo はノード復元と削除したエッジの復元
+      state.nodes.set(cmd.node.id, { id: cmd.node.id, label: cmd.node.label || "" });
+      for (const e of cmd.removedEdges) state.edges.add(edgeKey(e.p, e.c));
+      state.future.push({ type: "addNode", node: cmd.node });
+    } else if (cmd.type === "renameLabel") {
       const n = state.nodes.get(cmd.id); if (n) n.label = cmd.prev;
-      state.future.push({type:"renameLabel", id:cmd.id, prev:cmd.next, next:cmd.prev});
+      state.future.push({ type: "renameLabel", id: cmd.id, prev: cmd.next, next: cmd.prev });
     }
     render();
   }
   function redo() {
+    // redo スタックからコマンドを取り出して再実行
     const cmd = state.future.pop(); if (!cmd) return;
-    if (cmd.type==="addEdge") { state.edges.add(edgeKey(cmd.parent,cmd.child)); state.history.push(cmd); }
-    else if (cmd.type==="removeEdge") { state.edges.delete(edgeKey(cmd.parent,cmd.child)); state.history.push(cmd); }
-    else if (cmd.type==="addNode") { state.nodes.set(cmd.node.id, {id:cmd.node.id, label:cmd.node.label||""}); state.history.push(cmd); }
-    else if (cmd.type==="removeNode") {
+    if (cmd.type === "addEdge") { state.edges.add(edgeKey(cmd.parent, cmd.child)); state.history.push(cmd); }
+    else if (cmd.type === "removeEdge") { state.edges.delete(edgeKey(cmd.parent, cmd.child)); state.history.push(cmd); }
+    else if (cmd.type === "addNode") { state.nodes.set(cmd.node.id, { id: cmd.node.id, label: cmd.node.label || "" }); state.history.push(cmd); }
+    else if (cmd.type === "removeNode") {
       const id = cmd.node.id;
-      for (const k of [...state.edges]) { const {p,c}=parseEdgeKey(k); if (p===id || c===id) state.edges.delete(k); }
+      for (const k of [...state.edges]) { const { p, c } = parseEdgeKey(k); if (p === id || c === id) state.edges.delete(k); }
       state.nodes.delete(id); state.history.push(cmd);
-    } else if (cmd.type==="renameLabel") {
-      const n = state.nodes.get(cmd.id); if (n) n.label = cmd.next;
-      state.history.push(cmd);
-    }
+    } else if (cmd.type === "renameLabel") { const n = state.nodes.get(cmd.id); if (n) n.label = cmd.next; state.history.push(cmd); }
     render();
   }
 
@@ -348,24 +396,21 @@
    * 入出力（JSON / Mermaid）
    * ************************************************************************* */
   function exportJSON() {
-    const blob = new Blob([JSON.stringify({
-      nodes:[...state.nodes.values()],
-      edges:[...state.edges].map(parseEdgeKey)
-    }, null, 2)], {type:"application/json"});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = "dag.json"; a.click(); URL.revokeObjectURL(a.href);
+    // 現在のノード/エッジを JSON にしてダウンロードさせる
+    const blob = new Blob([JSON.stringify({ nodes: [...state.nodes.values()], edges: [...state.edges].map(parseEdgeKey) }, null, 2)], { type: "application/json" });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = "dag.json"; a.click(); URL.revokeObjectURL(a.href);
   }
   function importJSON(obj) {
+    // JSON インポート。フォーマットをチェックしてから state を置換
     if (!obj || !Array.isArray(obj.nodes) || !Array.isArray(obj.edges)) { alert("フォーマット不正: {nodes:[{id,label}], edges:[{p,c}]}"); return; }
-    state.nodes.clear(); state.edges.clear(); state.history.length=0; state.future.length=0; state.lastId=0; state.focus=null;
+    state.nodes.clear(); state.edges.clear(); state.history.length = 0; state.future.length = 0; state.lastId = 0; state.focus = null;
     for (const n of obj.nodes) {
-      const id = String(n.id); state.nodes.set(id, {id, label:n.label ?? ""});
+      const id = String(n.id); state.nodes.set(id, { id, label: n.label ?? "" });
       const num = Number(id); if (Number.isFinite(num)) state.lastId = Math.max(state.lastId, num);
     }
     for (const e of obj.edges) {
-      const p=String(e.p), c=String(e.c);
-      if (state.nodes.has(p) && state.nodes.has(c) && !wouldCreateCycle(p,c)) state.edges.add(edgeKey(p,c));
+      const p = String(e.p), c = String(e.c);
+      if (state.nodes.has(p) && state.nodes.has(c) && !wouldCreateCycle(p, c)) state.edges.add(edgeKey(p, c));
     }
     render();
   }
@@ -392,6 +437,7 @@
   /* ***************************************************************************
    * 画面レンダリング（候補リスト/依存表/Mermaid/SVG）
    * ************************************************************************* */
+  // DOM 要素は一度だけ取得して再利用（DOM クエリのオーバーヘッド削減）
   const leftList = document.getElementById('leftList');
   const rightList = document.getElementById('rightList');
   const edgeTable = document.getElementById('edgeTable');
@@ -401,42 +447,62 @@
 
   function render() {
     // --- 絞り込み ---
+    // filterLeft/filterRight は頻出なのでキャッシュしても良いが簡潔のため直接参照
     const fl = document.getElementById('filterLeft').value.trim().toLowerCase();
     const fr = document.getElementById('filterRight').value.trim().toLowerCase();
     const nodeMatch = (n,f)=> !f || n.id.toLowerCase().includes(f) || (n.label||"").toLowerCase().includes(f);
 
     // --- 候補リスト ---
-    leftList.innerHTML=""; rightList.innerHTML="";
-    for (const n of state.nodes.values()) if (nodeMatch(n,fl)) leftList.appendChild(renderItem(n,{draggable:true,role:"parent"}));
-    for (const n of state.nodes.values()) if (nodeMatch(n,fr)) rightList.appendChild(renderItem(n,{draggable:false,role:"child"}));
+    // 候補リストの再構築（左はドラッグで親開始、右はドロップ先）
+    leftList.innerHTML = ""; rightList.innerHTML = "";
+    for (const n of state.nodes.values()) {
+      if (nodeMatch(n, fl)) leftList.appendChild(renderItem(n, {draggable:true, role:"parent"}));
+      if (nodeMatch(n, fr)) rightList.appendChild(renderItem(n, {draggable:false, role:"child"}));
+    }
 
     // --- datalist更新（ハイライト入力補助） ---
-    datalist.innerHTML="";
+    // datalist を更新して入力補助を有効にする
+    datalist.innerHTML = "";
     for (const n of state.nodes.values()) {
       const opt = document.createElement('option');
-      opt.value = n.id; opt.label = n.label ? `${n.id} — ${n.label}` : n.id;
+      opt.value = n.id;
+      opt.label = n.label ? `${n.id} — ${n.label}` : n.id;
       datalist.appendChild(opt);
     }
 
     // --- 依存表 ---
-    edgeTable.innerHTML="";
+    // 依存表を再構築
+    edgeTable.innerHTML = "";
     for (const k of state.edges) {
-      const {p,c}=parseEdgeKey(k);
-      const pn=state.nodes.get(p), cn=state.nodes.get(c);
-      const tr=document.createElement('tr');
-      const tdP=document.createElement('td'); tdP.textContent = `${pn?.id ?? p} (${pn?.label ?? ""})`;
-      const tdArrow=document.createElement('td'); tdArrow.textContent="→";
-      const tdC=document.createElement('td'); tdC.textContent = `${cn?.id ?? c} (${cn?.label ?? ""})`;
-      const tdStatus=document.createElement('td'); tdStatus.innerHTML = `<span style="color:var(--ok)">OK</span>`;
-      const tdOps=document.createElement('td');
-      const btnDel=document.createElement('button'); btnDel.textContent="削除"; btnDel.onclick=()=> removeEdge(p,c);
+      const {p,c} = parseEdgeKey(k);
+      const pn = state.nodes.get(p), cn = state.nodes.get(c);
+      const tr = document.createElement('tr');
+      const tdP = document.createElement('td'); tdP.textContent = `${pn?.id ?? p} (${pn?.label ?? ""})`;
+      const tdArrow = document.createElement('td'); tdArrow.textContent = "→";
+      const tdC = document.createElement('td'); tdC.textContent = `${cn?.id ?? c} (${cn?.label ?? ""})`;
+      const tdStatus = document.createElement('td'); tdStatus.innerHTML = `<span style="color:var(--ok)">OK</span>`;
+      const tdOps = document.createElement('td');
+      const btnDel = document.createElement('button'); btnDel.textContent = "削除"; btnDel.onclick = () => removeEdge(p,c);
       tdOps.appendChild(btnDel);
-      tr.append(tdP,tdArrow,tdC,tdStatus,tdOps);
+      tr.append(tdP, tdArrow, tdC, tdStatus, tdOps);
       edgeTable.appendChild(tr);
     }
 
     // --- Mermaidテキスト ---
-    mermaidTxt.textContent = mermaidText();
+    const mtxt = mermaidText();
+    // 自動レンダリング（mermaid がロードされている場合）。失敗しても UI を壊さない。
+    if (window.mermaid && typeof mermaid.render === 'function') {
+      try {
+        // mermaid.render は非同期に SVG を返すことがあるため安全にハンドリング
+        mermaid.parse(mtxt); // まず構文チェック（例外が出ればテキストを表示）
+        const svgId = 'mermaid-' + Date.now();
+        mermaid.render(svgId, mtxt, (svgCode) => { mermaidTxt.innerHTML = svgCode; });
+      } catch (e) {
+        mermaidTxt.textContent = mtxt; // 構文エラーなどはテキストで表示
+      }
+    } else {
+      mermaidTxt.textContent = mtxt;
+    }
 
     // --- 永続化 ---
     try {
@@ -450,12 +516,13 @@
 
   // 候補カードの描画（DnD）
   function renderItem(n, {draggable, role}) {
-    const el=document.createElement('div'); el.className='item'+(draggable?' drag-parent':'');
+    // ノード一覧のアイテム要素を作成して返す
+    const el = document.createElement('div'); el.className = 'item' + (draggable ? ' drag-parent' : '');
     el.setAttribute('data-id', n.id); el.setAttribute('data-role', role);
 
-    const left=document.createElement('div'); left.style.display='flex'; left.style.flexDirection='column';
-    left.innerHTML = `<div><strong>${escapeHTML(n.id)}</strong> ${n.label?`- ${escapeHTML(n.label)}`:""}</div>
-                      <div class="meta">${draggable?'ドラッグして親として開始':'ドロップで子として確定'}</div>`;
+    const left = document.createElement('div'); left.style.display = 'flex'; left.style.flexDirection = 'column';
+    left.innerHTML = `<div><strong>${escapeHTML(n.id)}</strong> ${n.label ? `- ${escapeHTML(n.label)}` : ""}</div>` +
+      `<div class="meta">${draggable ? 'ドラッグして親として開始' : 'ドロップで子として確定'}</div>`;
     const ops=document.createElement('div'); ops.className='ops';
     const editBtn=document.createElement('button'); editBtn.className='icon'; editBtn.title='ラベル編集'; editBtn.textContent='✎';
     editBtn.onclick=()=>{
@@ -470,24 +537,25 @@
     ops.append(editBtn,delBtn); el.append(left,ops);
 
     if (draggable) {
-      // 親候補：ドラッグ開始
-      el.setAttribute('draggable','true');
-      el.addEventListener('dragstart', ev=>{ el.classList.add('dragging'); ev.dataTransfer?.setData('text/plain', n.id); rightList.classList.add('drop-ready'); });
-      el.addEventListener('dragend', ()=>{ el.classList.remove('dragging'); rightList.classList.remove('drop-ready'); [...rightList.querySelectorAll('.item')].forEach(x=>x.classList.remove('drop-target')); });
-      // タッチ簡易対応
-      el.addEventListener('pointerdown', ev=>{ el.setPointerCapture(ev.pointerId); el.dataset.draggingPointer='1'; rightList.classList.add('drop-ready'); });
-      el.addEventListener('pointerup',   ev=>{ el.releasePointerCapture?.(ev.pointerId); delete el.dataset.draggingPointer; rightList.classList.remove('drop-ready'); [...rightList.querySelectorAll('.item')].forEach(x=>x.classList.remove('drop-target')); });
+      // 親候補：ドラッグ開始のイベントを設定
+      el.setAttribute('draggable', 'true');
+      el.addEventListener('dragstart', ev => { el.classList.add('dragging'); ev.dataTransfer?.setData('text/plain', n.id); rightList.classList.add('drop-ready'); });
+      el.addEventListener('dragend', () => { el.classList.remove('dragging'); rightList.classList.remove('drop-ready'); [...rightList.querySelectorAll('.item')].forEach(x => x.classList.remove('drop-target')); });
+      // タッチ（pointer）向けの簡易対応
+      el.addEventListener('pointerdown', ev => { el.setPointerCapture(ev.pointerId); el.dataset.draggingPointer = '1'; rightList.classList.add('drop-ready'); });
+      el.addEventListener('pointerup', ev => { el.releasePointerCapture?.(ev.pointerId); delete el.dataset.draggingPointer; rightList.classList.remove('drop-ready'); [...rightList.querySelectorAll('.item')].forEach(x => x.classList.remove('drop-target')); });
     } else {
-      // 子候補：ドロップ先
-      el.addEventListener('dragover', ev=>{ ev.preventDefault(); el.classList.add('drop-target'); });
-      el.addEventListener('dragleave', ()=> el.classList.remove('drop-target'));
-      el.addEventListener('drop', ev=>{
+      // 子候補：ドロップ先として振る舞うイベント
+      el.addEventListener('dragover', ev => { ev.preventDefault(); el.classList.add('drop-target'); });
+      el.addEventListener('dragleave', () => el.classList.remove('drop-target'));
+      el.addEventListener('drop', ev => {
         ev.preventDefault(); el.classList.remove('drop-target');
         const parentId = ev.dataTransfer?.getData('text/plain'); if (!parentId) return;
         const r = addEdge(parentId, n.id); if (!r.ok) alert(`追加失敗: ${r.reason}`);
       });
-      el.addEventListener('pointerenter', ()=>{ const dragging = leftList.querySelector('.item.dragging') || leftList.querySelector('.item[data-dragging-pointer="1"]'); if (dragging) el.classList.add('drop-target'); });
-      el.addEventListener('pointerup', ()=>{ const dragging = leftList.querySelector('.item.dragging') || leftList.querySelector('.item[data-dragging-pointer="1"]'); if (!dragging) return; const parentId = dragging.getAttribute('data-id'); const r = addEdge(parentId, n.id); if (!r.ok) alert(`追加失敗: ${r.reason}`); });
+      // pointer（タッチ）でドロップする簡易ロジック
+      el.addEventListener('pointerenter', () => { const dragging = leftList.querySelector('.item.dragging') || leftList.querySelector('.item[data-dragging-pointer="1"]'); if (dragging) el.classList.add('drop-target'); });
+      el.addEventListener('pointerup', () => { const dragging = leftList.querySelector('.item.dragging') || leftList.querySelector('.item[data-dragging-pointer="1"]'); if (!dragging) return; const parentId = dragging.getAttribute('data-id'); const r = addEdge(parentId, n.id); if (!r.ok) alert(`追加失敗: ${r.reason}`); });
     }
     return el;
   }
@@ -502,18 +570,19 @@
     const edgeSet = new Set();
 
     // BFSユーティリティ（方向と深さで探索）
+    // BFS を使って指定方向に深さ制限つきで探索するユーティリティ
     const bfs = (startIds, nextOf, maxDepth) => {
       const q = []; const dist = new Map();
-      for (const s of startIds) { q.push(s); dist.set(s,0); }
+      for (const s of startIds) { q.push(s); dist.set(s, 0); }
       while (q.length) {
         const v = q.shift();
-        const d = dist.get(v)??0;
-        if (maxDepth!==null && d>=maxDepth) continue; // 深さ制限
+        const d = dist.get(v) ?? 0;
+        if (maxDepth !== null && d >= maxDepth) continue; // 深さ制限
         for (const w of nextOf.get(v) || []) {
-          if (!dist.has(w)) { dist.set(w, d+1); q.push(w); }
+          if (!dist.has(w)) { dist.set(w, d + 1); q.push(w); }
           nodeSet.add(w);
-          // エッジ方向に応じた key を積む
-          const k = nextOf===out ? edgeKey(v,w) : edgeKey(w,v);
+          // nextOf が out（順方向）の場合は v->w、rev（逆方向）の場合は w->v としてエッジを追加
+          const k = nextOf === out ? edgeKey(v, w) : edgeKey(w, v);
           edgeSet.add(k);
         }
       }
@@ -571,8 +640,8 @@
     const {ranks} = computeLayout();
     const dir = state.direction;
 
-    // ノード見た目設定
-    const nodeW=150, nodeH=56, hGap=56, vGap=28, padX=10, idFont=13, labelFont=12;
+  // ノード見た目設定（幅/高さ/間隔など）
+  const nodeW = 150, nodeH = 56, hGap = 56, vGap = 28, padX = 10, idFont = 13, labelFont = 12;
 
     // 位置計算
     const pos=new Map(); const rankKeys=[...ranks.keys()].sort((a,b)=>a-b); let maxRows=0;
@@ -581,9 +650,9 @@
       arr.forEach((id,j)=>{ const x=(dir==='LR') ? i*(nodeW+hGap) : j*(nodeW+hGap); const y=(dir==='LR') ? j*(nodeH+vGap) : i*(nodeH+vGap); pos.set(id,{x,y}); });
     });
 
-    // コンテンツサイズ
-    const contentW = (dir==='LR') ? (rankKeys.length-1)*(nodeW+hGap)+nodeW : (maxRows-1)*(nodeW+hGap)+nodeW;
-    const contentH = (dir==='LR') ? (maxRows-1)*(nodeH+vGap)+nodeH : (rankKeys.length-1)*(nodeH+vGap)+nodeH;
+  // コンテンツの幅と高さを計算
+  const contentW = (dir === 'LR') ? (rankKeys.length - 1) * (nodeW + hGap) + nodeW : (maxRows - 1) * (nodeW + hGap) + nodeW;
+  const contentH = (dir === 'LR') ? (maxRows - 1) * (nodeH + vGap) + nodeH : (rankKeys.length - 1) * (nodeH + vGap) + nodeH;
 
     // === ハイライト対象集合の計算 ===
     let focusNodes=null, focusEdges=null, focusCenter=null;
@@ -610,10 +679,10 @@
       const c1x=(dir==='LR')?srcX+dx:srcX, c1y=(dir==='LR')?srcY:srcY+dy;
       const c2x=(dir==='LR')?dstX-dx:dstX, c2y=(dir==='LR')?dstY:dstY-dy;
 
-      const path=document.createElementNS('http://www.w3.org/2000/svg','path');
-      path.setAttribute('d', `M ${srcX} ${srcY} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${dstX} ${dstY}`);
-      path.setAttribute('fill','none'); path.setAttribute('stroke','var(--edge)'); path.setAttribute('stroke-width','1.5');
-      path.setAttribute('marker-end','url(#arrow)'); path.setAttribute('opacity','0.95');
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', `M ${srcX} ${srcY} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${dstX} ${dstY}`);
+  path.setAttribute('fill', 'none'); path.setAttribute('stroke', 'var(--edge)'); path.setAttribute('stroke-width', '1.5');
+  path.setAttribute('marker-end', 'url(#arrow)'); path.setAttribute('opacity', '0.95');
 
       // ハイライト適用：対象エッジなら強調 / それ以外はdim
       if (focusEdges) {
@@ -621,8 +690,8 @@
         else path.classList.add('dim');
       }
 
-      // クリックでエッジ削除
-      path.addEventListener('click', ()=>{ if (confirm(`この依存を削除しますか？\n${p} → ${c}`)) removeEdge(p,c); });
+      // クリックでエッジを削除するトグル（確認ダイアログあり）
+      path.addEventListener('click', () => { if (confirm(`この依存を削除しますか？\n${p} → ${c}`)) removeEdge(p, c); });
       graphSvg.appendChild(path);
     }
 
@@ -651,23 +720,23 @@
       labelText.setAttribute('font-size',String(labelFont)); labelText.setAttribute('fill','#334155'); labelText.setAttribute('opacity', label?'1':'0.55');
       labelText.textContent = label ? ellipsis(label, nodeW - padX*2, 7) : "(ラベルなし)";
 
-      // ツールチップ（フル表示）
-      const title = document.createElementNS('http://www.w3.org/2000/svg','title');
-      title.textContent = label ? `${id} — ${label}` : id;
+  // ツールチップ（title 要素）を付与
+  const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+  title.textContent = label ? `${id} — ${label}` : id;
 
-      // ハイライト適用：対象ノード/中心ノード/非対象のdim化
+      // ハイライト適用：focusNodes があれば対象外を淡くし、対象は枠を強調
       if (focusNodes) {
         if (focusNodes.has(id)) {
           rect.classList.add('hi-node');
-          if (id===focusCenter) rect.classList.add('hi-center');
+          if (id === focusCenter) rect.classList.add('hi-center');
         } else {
           g.classList.add('dim');
         }
       }
 
-      // ホバー装飾
-      g.addEventListener('mouseenter', ()=>{ rect.style.stroke = '#06b6d4'; rect.style.strokeWidth = '2'; });
-      g.addEventListener('mouseleave', ()=>{ rect.style.stroke = focusNodes && focusNodes.has(id) ? rect.style.stroke : '#cbd5e1'; rect.style.strokeWidth = focusNodes && focusNodes.has(id) ? rect.style.strokeWidth : '1.25'; });
+  // ホバー装飾（簡易）
+  g.addEventListener('mouseenter', () => { rect.style.stroke = '#06b6d4'; rect.style.strokeWidth = '2'; });
+  g.addEventListener('mouseleave', () => { rect.style.stroke = focusNodes && focusNodes.has(id) ? rect.style.stroke : '#cbd5e1'; rect.style.strokeWidth = focusNodes && focusNodes.has(id) ? rect.style.strokeWidth : '1.25'; });
 
       // クリック：このノードを中心にハイライト（現在のモード/深さを利用）
       g.addEventListener('click', ()=>{
@@ -697,22 +766,23 @@
    * ************************************************************************* */
   (function(){
     let isPanning=false, start={x:0,y:0}, startView={x:0,y:0};
-    graphSvg.addEventListener('mousedown', ev=>{ isPanning=true; start={x:ev.clientX,y:ev.clientY}; startView={...view}; });
-    window.addEventListener('mousemove', ev=>{
+    // マウスドラッグでパン、ホイールでズームを実装
+    graphSvg.addEventListener('mousedown', ev => { isPanning = true; start = { x: ev.clientX, y: ev.clientY }; startView = { ...view }; });
+    window.addEventListener('mousemove', ev => {
       if (!isPanning) return;
-      const dx = (ev.clientX-start.x) * (view.w / graphSvg.clientWidth);
-      const dy = (ev.clientY-start.y) * (view.h / graphSvg.clientHeight);
+      const dx = (ev.clientX - start.x) * (view.w / graphSvg.clientWidth);
+      const dy = (ev.clientY - start.y) * (view.h / graphSvg.clientHeight);
       view.x = startView.x - dx; view.y = startView.y - dy; setViewBox();
     });
-    window.addEventListener('mouseup', ()=>{ isPanning=false; });
-    graphSvg.addEventListener('wheel', ev=>{
+    window.addEventListener('mouseup', () => { isPanning = false; });
+    graphSvg.addEventListener('wheel', ev => {
       ev.preventDefault();
-      const scale = (ev.deltaY<0) ? 0.9 : 1.1;
+      const scale = (ev.deltaY < 0) ? 0.9 : 1.1;
       const mx = ev.offsetX / graphSvg.clientWidth; const my = ev.offsetY / graphSvg.clientHeight;
-      const vx = view.x + view.w*mx; const vy = view.y + view.h*my;
+      const vx = view.x + view.w * mx; const vy = view.y + view.h * my;
       view.w *= scale; view.h *= scale;
-      view.x = vx - view.w*mx; view.y = vy - view.h*my; setViewBox();
-    }, {passive:false});
+      view.x = vx - view.w * mx; view.y = vy - view.h * my; setViewBox();
+    }, { passive: false });
   })();
 
   document.getElementById('fitBtn').onclick = ()=>{
@@ -766,6 +836,63 @@
   };
   document.getElementById('filterLeft').addEventListener('input', render);
   document.getElementById('filterRight').addEventListener('input', render);
+
+  // ===== ノード追加ボタン（単体／一括） =====
+  document.getElementById('addNodeBtn').addEventListener('click', ()=>{
+    const id = document.getElementById('newId').value.trim();
+    const label = document.getElementById('newLabel').value.trim();
+    if (id) {
+      const r = addNodeWithId(id, label);
+      if (!r.ok) { alert(`追加失敗: ${r.reason}`); return; }
+    } else {
+      addNodeAuto(label);
+    }
+    // 入力クリアと再描画
+    document.getElementById('newId').value = ""; document.getElementById('newLabel').value = "";
+    render();
+  });
+
+  document.getElementById('bulkAddBtn').addEventListener('click', ()=>{
+    const txt = document.getElementById('bulkText').value.trim(); if (!txt) return;
+    // 各行を解析: ID,Label または ID<TAB>Label または ID のみ
+    const lines = txt.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+    let added=0;
+    for (const line of lines) {
+      const m = line.split(/\s*,\s*|\t/); // カンマまたはタブで分割
+      const id = m[0]?.trim(); const label = (m[1]||"").trim();
+      if (!id) continue;
+      const r = addNodeWithId(id, label);
+      if (!r.ok) {
+        // 既存IDで失敗した場合は自動追加にフォールバックしない。ユーザに通知して処理続行
+        console.warn(`bulk add skipped ${id}: ${r.reason}`);
+        continue;
+      }
+      added++;
+    }
+    if (added) render();
+  });
+
+  document.getElementById('bulkClearBtn').addEventListener('click', ()=>{ document.getElementById('bulkText').value = ""; });
+
+  // Enter キーで追加（newLabel フィールドで Enter を押しても追加できる）
+  const newIdEl = document.getElementById('newId');
+  const newLabelEl = document.getElementById('newLabel');
+  const bulkTextEl = document.getElementById('bulkText');
+  newIdEl.addEventListener('keydown', e=>{ if (e.key==='Enter') { e.preventDefault(); document.getElementById('addNodeBtn').click(); } });
+  newLabelEl.addEventListener('keydown', e=>{ if (e.key==='Enter') { e.preventDefault(); document.getElementById('addNodeBtn').click(); } });
+
+  // bulkAddBtn はテキストが無いと無効化
+  const bulkAddBtn = document.getElementById('bulkAddBtn');
+  const updateBulkBtn = ()=> bulkAddBtn.disabled = !bulkTextEl.value.trim();
+  bulkTextEl.addEventListener('input', updateBulkBtn); updateBulkBtn();
+
+  // アクセシビリティ: ボタンに aria-label を追加（既に見た目でわかるが補助）
+  document.getElementById('addNodeBtn').setAttribute('aria-label', '単一ノード追加');
+  bulkAddBtn.setAttribute('aria-label', '一括ノード追加');
+  document.getElementById('bulkClearBtn').setAttribute('aria-label', '一括入力クリア');
+
+  // ドラッグ時のデフォルト Ghost 画像を抑制（UX向上）
+  document.addEventListener('dragstart', ev=>{ if (ev.dataTransfer) { try{ ev.dataTransfer.setDragImage(document.createElement('div'),0,0); }catch(e){} } }, true);
 
   /* ***************************************************************************
    * 初期化（保存済み → 復元 or シード）
