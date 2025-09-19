@@ -1,0 +1,779 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<title>DAG Linker (Highlight relatives on selection)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  /* ===== 基本テーマ ===== */
+  :root { --bg:#f9fbfd; --fg:#0f172a; --muted:#64748b; --accent:#06b6d4; --danger:#ef4444; --ok:#10b981; --edge:#94a3b8; }
+  body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto; background:var(--bg); color:var(--fg); }
+  header { padding: 12px 16px; border-bottom:1px solid #e2e8f0; background:white; position:sticky; top:0; z-index:10;}
+  header h1 { margin:0; font-size:18px; }
+
+  /* ===== ツールバー ===== */
+  .toolbar { display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap; }
+  .toolbar input[type="text"], .toolbar select { padding:6px 8px; border:1px solid #cbd5e1; border-radius:8px; min-width:160px;}
+  .toolbar button { padding:6px 10px; border-radius:8px; border:1px solid #cbd5e1; background:white; cursor:pointer;}
+  .toolbar button.primary { background:var(--accent); border-color:var(--accent); color:white; }
+  .toolbar button.danger { background:var(--danger); border-color:var(--danger); color:white;}
+
+  /* ===== レイアウト：左右の候補 + 右側情報 ===== */
+  .container { display:grid; grid-template-columns: 1fr 1fr 1.2fr; gap:12px; padding:12px; }
+  .panel { background:white; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; display:flex; flex-direction:column; min-height:300px; }
+  .panel h2 { font-size:14px; margin:0; padding:10px 12px; border-bottom:1px solid #e2e8f0; background:#f8fafc; display:flex; gap:8px; align-items:center; }
+  .list { overflow:auto; padding:8px; display:flex; flex-direction:column; gap:6px; }
+
+  /* ===== 候補カード ===== */
+  .item { padding:8px 10px; border:1px solid #e5e7eb; border-radius:8px; background:#fff; user-select:none; touch-action:none; display:flex; justify-content:space-between; align-items:center; gap:8px;}
+  .item .meta { font-size:11px; color:var(--muted);}
+  .item .ops { display:flex; gap:6px; }
+  .item button.icon { border:1px solid #cbd5e1; background:#fff; border-radius:8px; padding:2px 6px; font-size:12px; cursor:pointer; }
+  .item.drag-parent { cursor:grab; }
+  .item.drag-parent:active { cursor:grabbing; }
+  .drop-ready .item { outline: 2px dashed #cbd5e1; }
+  .drop-target { outline:2px dashed var(--accent); background: #ecfeff; }
+
+  /* ===== 依存テーブル ===== */
+  .edges { overflow:auto; }
+  table { width:100%; border-collapse: collapse; font-size:13px; }
+  th, td { border-bottom:1px solid #f1f5f9; padding:8px; text-align:left; }
+
+  /* ===== 補助UI ===== */
+  .pill { display:inline-block; padding:2px 6px; border-radius:999px; background:#f1f5f9; }
+  .mermaid-box { padding:8px; background:#0b1020; color:#e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre; overflow:auto; font-size:12px; border-top:1px solid #1f2937;}
+  .addbar { display:flex; gap:8px; align-items:center; padding:8px 0; flex-wrap:wrap; }
+  details.bulk { background:#f8fafc; border:1px dashed #cbd5e1; border-radius:10px; padding:8px 10px; }
+  details.bulk textarea { width:100%; min-height:120px; padding:8px; border:1px solid #cbd5e1; border-radius:8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  /* ===== SVG描画エリア ===== */
+  .render-toolbar { padding:8px 12px; border-bottom:1px solid #e2e8f0; display:flex; gap:8px; flex-wrap:wrap; align-items:center; background:#fafafa;}
+  .canvasWrap { position:relative; height:520px; background:#ffffff; }
+  svg#graphSvg { width:100%; height:100%; cursor:grab; }
+  svg#graphSvg:active { cursor:grabbing; }
+  .legend { margin-left:auto; font-size:12px; color:var(--muted); }
+
+  /* ===== ハイライト表現 ===== */
+  .dim { opacity: 0.18; transition: opacity .15s ease; }       /* 非対象は淡く */
+  .hi-node { stroke:#0ea5e9 !important; stroke-width:2 !important; } /* 対象ノード枠 */
+  .hi-center { stroke:#ef4444 !important; stroke-width:2.5 !important; } /* 中心ノード */
+  .hi-edge { stroke:#0ea5e9 !important; stroke-width:2 !important; opacity:0.95 !important; } /* 対象エッジ */
+</style>
+</head>
+<body>
+  <header>
+    <h1>すごい工程管理</h1>
+
+    <!-- ===== 候補（ノード）追加バー ===== -->
+    <div class="addbar">
+      <strong>候補を追加:</strong>
+      <input id="newId" type="text" placeholder="ID（任意。未入力は自動）" />
+      <input id="newLabel" type="text" placeholder="ラベル/要素名（任意）" />
+      <button id="addNodeBtn" class="primary">追加</button>
+      <details class="bulk">
+        <summary>一括追加</summary>
+        <div style="font-size:12px; color:var(--muted); margin:6px 0;">
+          1行=1ノード。<code>ID,Label</code> / <code>ID<TAB>Label</code> / <code>IDのみ</code> に対応。
+        </div>
+        <textarea id="bulkText" placeholder="例&#10;A,担当業務A&#10;B,担当業務B&#10;C,レビュー"></textarea>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button id="bulkAddBtn">一括追加</button>
+          <button id="bulkClearBtn" class="danger">クリア</button>
+        </div>
+      </details>
+    </div>
+
+    <!-- ===== フィルタ/履歴/入出力 ===== -->
+    <div class="toolbar">
+      <input id="filterLeft" type="text" placeholder="左(親)の絞り込み…" />
+      <input id="filterRight" type="text" placeholder="右(子)の絞り込み…" />
+      <button id="undoBtn">Undo</button>
+      <button id="redoBtn">Redo</button>
+      <button id="exportBtn" class="primary">Export JSON</button>
+      <button id="importBtn">Import JSON</button>
+      <input id="fileInput" type="file" accept="application/json" style="display:none" />
+      <button id="clearBtn" class="danger">すべてリセット</button>
+    </div>
+
+    <!-- ===== ハイライト操作バー（新規） ===== -->
+    <div class="toolbar" style="margin-top:6px;">
+      <strong>ハイライト:</strong>
+      <!-- datalistでID補完 -->
+      <input id="focusId" list="nodeList" placeholder="中心ID（例: A）" />
+      <datalist id="nodeList"></datalist>
+      <select id="focusMode" title="対象範囲">
+        <option value="both">両方向（上流+下流）</option>
+        <option value="up">上流（祖先）</option>
+        <option value="down">下流（子孫）</option>
+        <option value="one">1-hop（親と子）</option>
+      </select>
+      <label>深さ:
+        <input id="focusDepth" type="number" min="1" step="1" placeholder="空=全域" style="width:84px" />
+      </label>
+      <button id="applyFocusBtn">適用</button>
+      <button id="clearFocusBtn">クリア</button>
+      <span class="legend">※SVG上のノードをクリックでもハイライト。Escで解除。</span>
+    </div>
+  </header>
+
+  <!-- ===== 左右候補 + 依存表 ===== -->
+  <div class="container">
+    <section class="panel" id="leftPanel">
+      <h2>親候補（ドラッグ開始）</h2>
+      <div id="leftList" class="list" aria-label="親候補一覧"></div>
+      <div class="render-toolbar" style="border-top:1px solid #e2e8f0; background:white;">
+        左の要素を右にドロップ → <span class="pill">親→子</span> を追加
+      </div>
+    </section>
+
+    <section class="panel" id="rightPanel">
+      <h2>子候補（ドロップ先）</h2>
+      <div id="rightList" class="list" aria-label="子候補一覧"></div>
+      <div class="render-toolbar" style="border-top:1px solid #e2e8f0; background:white;">
+        ドロップ可能な要素はハイライト表示
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>依存関係（編集可能）</h2>
+      <div class="edges">
+        <table>
+          <thead>
+            <tr><th>親</th><th>→</th><th>子</th><th>状態</th><th>操作</th></tr>
+          </thead>
+          <tbody id="edgeTable"></tbody>
+        </table>
+      </div>
+      <div class="mermaid-box" id="mermaidTxt"></div>
+      <div class="render-toolbar" style="border-top:1px solid #e2e8f0; background:white;">
+        Mermaidは <span class="pill">graph LR</span> のテキストを出力（描画は任意環境で）
+      </div>
+    </section>
+  </div>
+
+  <!-- ===== SVG描画パネル ===== -->
+  <section class="panel" style="margin: 0 12px 12px;">
+    <div class="render-toolbar">
+      <strong>依存グラフ（SVG描画）</strong>
+      <label>方向:
+        <select id="directionSel">
+          <option value="LR">LR（左→右）</option>
+          <option value="TB">TB（上→下）</option>
+        </select>
+      </label>
+      <label>ルート優先ID:
+        <input id="rootHint" type="text" placeholder="例: S" style="width:120px;" />
+      </label>
+      <button id="fitBtn">Fit</button>
+      <button id="exportSvgBtn">Export SVG</button>
+      <span class="legend">パン:ドラッグ / ズーム:ホイール</span>
+    </div>
+    <div class="canvasWrap">
+      <svg id="graphSvg">
+        <defs>
+          <!-- エッジ矢印 -->
+          <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"></path>
+          </marker>
+        </defs>
+      </svg>
+    </div>
+  </section>
+
+<script>
+(function(){
+  /* ***************************************************************************
+   * アプリ状態
+   * ************************************************************************* */
+  const state = {
+    nodes: new Map(),      // id -> {id, label}
+    edges: new Set(),      // "p|c"
+    history: [],           // Undo
+    future: [],            // Redo
+    lastId: 0,             // 自動採番上限
+    direction: 'LR',       // 'LR' or 'TB'
+    rootHint: '',          // レイアウトルートヒント
+    // === ハイライト状態（新規） ===
+    focus: null            // { id, mode: 'both'|'up'|'down'|'one', depth: number|null }
+  };
+
+  /* ===== エッジキー/文字列変換 ===== */
+  const edgeKey = (p,c)=> `${p}|${c}`;
+  const parseEdgeKey = k => { const [p,c]=k.split('|'); return {p,c}; }
+  const escapeHTML = s => String(s).replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
+  const safeMermaidId = s => 'n' + String(s).replace(/[^a-zA-Z0-9_]/g,'_');
+  const escapeMermaid = s => String(s).replace(/(["'`\\])/g,'\\$1');
+
+  /* ***************************************************************************
+   * ノード操作
+   * ************************************************************************* */
+  function addNodeAuto(label="", pushHistory=true) {
+    // 既存と衝突しない最大数値+1を割り当て
+    let n = state.lastId;
+    while (true) {
+      n++;
+      const id = String(n);
+      if (!state.nodes.has(id)) {
+        state.nodes.set(id, {id, label});
+        state.lastId = n;
+        if (pushHistory) state.history.push({type:"addNode", node:{id, label}});
+        state.future.length = 0;
+        return id;
+      }
+    }
+  }
+  function addNodeWithId(id, label="", pushHistory=true) {
+    id = String(id).trim();
+    if (!id) return {ok:false, reason:"IDが空です"};
+    if (state.nodes.has(id)) return {ok:false, reason:"同一IDが既に存在します"};
+    state.nodes.set(id, {id, label:String(label||"")});
+    const num = Number(id); if (Number.isFinite(num)) state.lastId = Math.max(state.lastId, num);
+    if (pushHistory) state.history.push({type:"addNode", node:{id, label}});
+    state.future.length = 0;
+    render();
+    return {ok:true, id};
+  }
+  function removeNode(id, pushHistory=true) {
+    if (!state.nodes.has(id)) return {ok:false, reason:"ノードが存在しません"};
+    const removedEdges = [];
+    for (const k of [...state.edges]) { const {p,c}=parseEdgeKey(k); if (p===id || c===id) { state.edges.delete(k); removedEdges.push({p,c}); } }
+    const node = state.nodes.get(id);
+    state.nodes.delete(id);
+    if (pushHistory) state.history.push({type:"removeNode", node, removedEdges});
+    state.future.length = 0;
+    render();
+    return {ok:true};
+  }
+  function renameNodeLabel(id, newLabel, pushHistory=true) {
+    const n = state.nodes.get(id); if (!n) return {ok:false, reason:"ノードが存在しません"};
+    const prev = n.label||""; n.label = String(newLabel||"");
+    if (pushHistory) state.history.push({type:"renameLabel", id, prev, next:n.label});
+    state.future.length = 0;
+    render();
+    return {ok:true};
+  }
+
+  /* ***************************************************************************
+   * DAGチェック & エッジ操作
+   * ************************************************************************* */
+  function buildAdj() {
+    const out = new Map([...state.nodes.keys()].map(id=>[id,new Set()]));
+    const rev = new Map([...state.nodes.keys()].map(id=>[id,new Set()])); // 逆隣接（祖先探索用）
+    for (const k of state.edges) {
+      const {p,c}=parseEdgeKey(k);
+      if (!out.has(p)) out.set(p,new Set());
+      if (!rev.has(c)) rev.set(c,new Set());
+      out.get(p).add(c);
+      rev.get(c).add(p);
+    }
+    return {out, rev};
+  }
+  function wouldCreateCycle(parent, child) {
+    if (parent===child) return true;
+    const {out} = buildAdj();
+    if (!out.has(parent)) out.set(parent,new Set());
+    out.get(parent).add(child);
+    // child→…→parent があるかDFS
+    const target = parent;
+    const stack = [child], seen = new Set();
+    while (stack.length) {
+      const v = stack.pop();
+      if (v===target) return true;
+      if (seen.has(v)) continue;
+      seen.add(v);
+      const nxt = out.get(v)||new Set();
+      for (const w of nxt) stack.push(w);
+    }
+    return false;
+  }
+  function addEdge(parent, child, pushHistory=true) {
+    const k = edgeKey(parent, child);
+    if (!state.nodes.has(parent) || !state.nodes.has(child)) return {ok:false, reason:"存在しないノードです"};
+    if (state.edges.has(k)) return {ok:false, reason:"同一の依存が既にあります"};
+    if (wouldCreateCycle(parent, child)) return {ok:false, reason:"DAG違反（サイクルが発生）"};
+    state.edges.add(k);
+    if (pushHistory) state.history.push({type:"addEdge", parent, child});
+    state.future.length = 0;
+    render();
+    return {ok:true};
+  }
+  function removeEdge(parent, child, pushHistory=true) {
+    const k = edgeKey(parent, child);
+    if (!state.edges.has(k)) return {ok:false, reason:"依存が存在しません"};
+    state.edges.delete(k);
+    if (pushHistory) state.history.push({type:"removeEdge", parent, child});
+    state.future.length = 0;
+    render();
+    return {ok:true};
+  }
+
+  /* ***************************************************************************
+   * Undo / Redo
+   * ************************************************************************* */
+  function undo() {
+    const cmd = state.history.pop(); if (!cmd) return;
+    if (cmd.type==="addEdge") { state.edges.delete(edgeKey(cmd.parent,cmd.child)); state.future.push(cmd); }
+    else if (cmd.type==="removeEdge") { state.edges.add(edgeKey(cmd.parent,cmd.child)); state.future.push(cmd); }
+    else if (cmd.type==="addNode") {
+      const id = cmd.node.id, removedEdges=[];
+      for (const k of [...state.edges]) { const {p,c}=parseEdgeKey(k); if (p===id || c===id) { state.edges.delete(k); removedEdges.push({p,c}); } }
+      state.nodes.delete(id); state.future.push({type:"removeNode", node:cmd.node, removedEdges});
+    } else if (cmd.type==="removeNode") {
+      state.nodes.set(cmd.node.id, {id:cmd.node.id, label:cmd.node.label||""});
+      for (const e of cmd.removedEdges) state.edges.add(edgeKey(e.p,e.c));
+      state.future.push({type:"addNode", node:cmd.node});
+    } else if (cmd.type==="renameLabel") {
+      const n = state.nodes.get(cmd.id); if (n) n.label = cmd.prev;
+      state.future.push({type:"renameLabel", id:cmd.id, prev:cmd.next, next:cmd.prev});
+    }
+    render();
+  }
+  function redo() {
+    const cmd = state.future.pop(); if (!cmd) return;
+    if (cmd.type==="addEdge") { state.edges.add(edgeKey(cmd.parent,cmd.child)); state.history.push(cmd); }
+    else if (cmd.type==="removeEdge") { state.edges.delete(edgeKey(cmd.parent,cmd.child)); state.history.push(cmd); }
+    else if (cmd.type==="addNode") { state.nodes.set(cmd.node.id, {id:cmd.node.id, label:cmd.node.label||""}); state.history.push(cmd); }
+    else if (cmd.type==="removeNode") {
+      const id = cmd.node.id;
+      for (const k of [...state.edges]) { const {p,c}=parseEdgeKey(k); if (p===id || c===id) state.edges.delete(k); }
+      state.nodes.delete(id); state.history.push(cmd);
+    } else if (cmd.type==="renameLabel") {
+      const n = state.nodes.get(cmd.id); if (n) n.label = cmd.next;
+      state.history.push(cmd);
+    }
+    render();
+  }
+
+  /* ***************************************************************************
+   * 入出力（JSON / Mermaid）
+   * ************************************************************************* */
+  function exportJSON() {
+    const blob = new Blob([JSON.stringify({
+      nodes:[...state.nodes.values()],
+      edges:[...state.edges].map(parseEdgeKey)
+    }, null, 2)], {type:"application/json"});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = "dag.json"; a.click(); URL.revokeObjectURL(a.href);
+  }
+  function importJSON(obj) {
+    if (!obj || !Array.isArray(obj.nodes) || !Array.isArray(obj.edges)) { alert("フォーマット不正: {nodes:[{id,label}], edges:[{p,c}]}"); return; }
+    state.nodes.clear(); state.edges.clear(); state.history.length=0; state.future.length=0; state.lastId=0; state.focus=null;
+    for (const n of obj.nodes) {
+      const id = String(n.id); state.nodes.set(id, {id, label:n.label ?? ""});
+      const num = Number(id); if (Number.isFinite(num)) state.lastId = Math.max(state.lastId, num);
+    }
+    for (const e of obj.edges) {
+      const p=String(e.p), c=String(e.c);
+      if (state.nodes.has(p) && state.nodes.has(c) && !wouldCreateCycle(p,c)) state.edges.add(edgeKey(p,c));
+    }
+    render();
+  }
+  function mermaidText() {
+    const lines=["graph LR"];
+    for (const n of state.nodes.values()) lines.push(`  ${safeMermaidId(n.id)}[${escapeMermaid(n.id)}]`);
+    for (const k of state.edges) { const {p,c}=parseEdgeKey(k); lines.push(`  ${safeMermaidId(p)} --> ${safeMermaidId(c)}`); }
+    return lines.join("\n");
+  }
+
+  /* ***************************************************************************
+   * 初期データ
+   * ************************************************************************* */
+  function seed() {
+    if (state.nodes.size) return;
+    addNodeWithId("S","開始",false);
+    addNodeWithId("A","担当業務A",false);
+    addNodeWithId("B","レビュー",false);
+    addNodeWithId("C","テスト準備",false);
+    addEdge("S","A",false); addEdge("A","B",false); addEdge("A","C",false);
+    render();
+  }
+
+  /* ***************************************************************************
+   * 画面レンダリング（候補リスト/依存表/Mermaid/SVG）
+   * ************************************************************************* */
+  const leftList = document.getElementById('leftList');
+  const rightList = document.getElementById('rightList');
+  const edgeTable = document.getElementById('edgeTable');
+  const mermaidTxt = document.getElementById('mermaidTxt');
+  const graphSvg = document.getElementById('graphSvg');
+  const datalist = document.getElementById('nodeList');
+
+  function render() {
+    // --- 絞り込み ---
+    const fl = document.getElementById('filterLeft').value.trim().toLowerCase();
+    const fr = document.getElementById('filterRight').value.trim().toLowerCase();
+    const nodeMatch = (n,f)=> !f || n.id.toLowerCase().includes(f) || (n.label||"").toLowerCase().includes(f);
+
+    // --- 候補リスト ---
+    leftList.innerHTML=""; rightList.innerHTML="";
+    for (const n of state.nodes.values()) if (nodeMatch(n,fl)) leftList.appendChild(renderItem(n,{draggable:true,role:"parent"}));
+    for (const n of state.nodes.values()) if (nodeMatch(n,fr)) rightList.appendChild(renderItem(n,{draggable:false,role:"child"}));
+
+    // --- datalist更新（ハイライト入力補助） ---
+    datalist.innerHTML="";
+    for (const n of state.nodes.values()) {
+      const opt = document.createElement('option');
+      opt.value = n.id; opt.label = n.label ? `${n.id} — ${n.label}` : n.id;
+      datalist.appendChild(opt);
+    }
+
+    // --- 依存表 ---
+    edgeTable.innerHTML="";
+    for (const k of state.edges) {
+      const {p,c}=parseEdgeKey(k);
+      const pn=state.nodes.get(p), cn=state.nodes.get(c);
+      const tr=document.createElement('tr');
+      const tdP=document.createElement('td'); tdP.textContent = `${pn?.id ?? p} (${pn?.label ?? ""})`;
+      const tdArrow=document.createElement('td'); tdArrow.textContent="→";
+      const tdC=document.createElement('td'); tdC.textContent = `${cn?.id ?? c} (${cn?.label ?? ""})`;
+      const tdStatus=document.createElement('td'); tdStatus.innerHTML = `<span style="color:var(--ok)">OK</span>`;
+      const tdOps=document.createElement('td');
+      const btnDel=document.createElement('button'); btnDel.textContent="削除"; btnDel.onclick=()=> removeEdge(p,c);
+      tdOps.appendChild(btnDel);
+      tr.append(tdP,tdArrow,tdC,tdStatus,tdOps);
+      edgeTable.appendChild(tr);
+    }
+
+    // --- Mermaidテキスト ---
+    mermaidTxt.textContent = mermaidText();
+
+    // --- 永続化 ---
+    try {
+      const obj = { nodes:[...state.nodes.values()], edges:[...state.edges].map(parseEdgeKey) };
+      localStorage.setItem('dag-linker', JSON.stringify(obj));
+    } catch(e){}
+
+    // --- SVG再描画 ---
+    drawSVG();
+  }
+
+  // 候補カードの描画（DnD）
+  function renderItem(n, {draggable, role}) {
+    const el=document.createElement('div'); el.className='item'+(draggable?' drag-parent':'');
+    el.setAttribute('data-id', n.id); el.setAttribute('data-role', role);
+
+    const left=document.createElement('div'); left.style.display='flex'; left.style.flexDirection='column';
+    left.innerHTML = `<div><strong>${escapeHTML(n.id)}</strong> ${n.label?`- ${escapeHTML(n.label)}`:""}</div>
+                      <div class="meta">${draggable?'ドラッグして親として開始':'ドロップで子として確定'}</div>`;
+    const ops=document.createElement('div'); ops.className='ops';
+    const editBtn=document.createElement('button'); editBtn.className='icon'; editBtn.title='ラベル編集'; editBtn.textContent='✎';
+    editBtn.onclick=()=>{
+      const newLabel=prompt(`ラベルを編集: ${n.id}`, n.label||"");
+      if (newLabel===null) return; renameNodeLabel(n.id,newLabel);
+    };
+    const delBtn=document.createElement('button'); delBtn.className='icon'; delBtn.title='ノード削除'; delBtn.textContent='🗑';
+    delBtn.onclick=()=>{
+      if (!confirm(`ノード「${n.id}」を削除します。関連する依存関係も削除されます。よろしいですか？`)) return;
+      removeNode(n.id);
+    };
+    ops.append(editBtn,delBtn); el.append(left,ops);
+
+    if (draggable) {
+      // 親候補：ドラッグ開始
+      el.setAttribute('draggable','true');
+      el.addEventListener('dragstart', ev=>{ el.classList.add('dragging'); ev.dataTransfer?.setData('text/plain', n.id); rightList.classList.add('drop-ready'); });
+      el.addEventListener('dragend', ()=>{ el.classList.remove('dragging'); rightList.classList.remove('drop-ready'); [...rightList.querySelectorAll('.item')].forEach(x=>x.classList.remove('drop-target')); });
+      // タッチ簡易対応
+      el.addEventListener('pointerdown', ev=>{ el.setPointerCapture(ev.pointerId); el.dataset.draggingPointer='1'; rightList.classList.add('drop-ready'); });
+      el.addEventListener('pointerup',   ev=>{ el.releasePointerCapture?.(ev.pointerId); delete el.dataset.draggingPointer; rightList.classList.remove('drop-ready'); [...rightList.querySelectorAll('.item')].forEach(x=>x.classList.remove('drop-target')); });
+    } else {
+      // 子候補：ドロップ先
+      el.addEventListener('dragover', ev=>{ ev.preventDefault(); el.classList.add('drop-target'); });
+      el.addEventListener('dragleave', ()=> el.classList.remove('drop-target'));
+      el.addEventListener('drop', ev=>{
+        ev.preventDefault(); el.classList.remove('drop-target');
+        const parentId = ev.dataTransfer?.getData('text/plain'); if (!parentId) return;
+        const r = addEdge(parentId, n.id); if (!r.ok) alert(`追加失敗: ${r.reason}`);
+      });
+      el.addEventListener('pointerenter', ()=>{ const dragging = leftList.querySelector('.item.dragging') || leftList.querySelector('.item[data-dragging-pointer="1"]'); if (dragging) el.classList.add('drop-target'); });
+      el.addEventListener('pointerup', ()=>{ const dragging = leftList.querySelector('.item.dragging') || leftList.querySelector('.item[data-dragging-pointer="1"]'); if (!dragging) return; const parentId = dragging.getAttribute('data-id'); const r = addEdge(parentId, n.id); if (!r.ok) alert(`追加失敗: ${r.reason}`); });
+    }
+    return el;
+  }
+
+  /* ***************************************************************************
+   * ハイライト計算（中心IDから上下流/1-hopへ）
+   * ************************************************************************* */
+  function computeFocusSets(centerId, mode, depth) {
+    // 戻り値：{ nodeSet:Set<string>, edgeSet:Set<string> }
+    const {out, rev} = buildAdj();
+    const nodeSet = new Set([centerId]); // 常に中心を含む
+    const edgeSet = new Set();
+
+    // BFSユーティリティ（方向と深さで探索）
+    const bfs = (startIds, nextOf, maxDepth) => {
+      const q = []; const dist = new Map();
+      for (const s of startIds) { q.push(s); dist.set(s,0); }
+      while (q.length) {
+        const v = q.shift();
+        const d = dist.get(v)??0;
+        if (maxDepth!==null && d>=maxDepth) continue; // 深さ制限
+        for (const w of nextOf.get(v) || []) {
+          if (!dist.has(w)) { dist.set(w, d+1); q.push(w); }
+          nodeSet.add(w);
+          // エッジ方向に応じた key を積む
+          const k = nextOf===out ? edgeKey(v,w) : edgeKey(w,v);
+          edgeSet.add(k);
+        }
+      }
+    };
+
+    if (mode==='one') {
+      // 1-hop：親と子のみ
+      for (const p of rev.get(centerId) || []) { nodeSet.add(p); edgeSet.add(edgeKey(p,centerId)); }
+      for (const c of out.get(centerId) || []) { nodeSet.add(c); edgeSet.add(edgeKey(centerId,c)); }
+      return {nodeSet, edgeSet};
+    }
+    if (mode==='up' || mode==='both') bfs([centerId], rev, depth ?? null);
+    if (mode==='down' || mode==='both') bfs([centerId], out, depth ?? null);
+    return {nodeSet, edgeSet};
+  }
+
+  /* ***************************************************************************
+   * SVG描画（ID＋ラベル表示、ハイライト反映）
+   * ************************************************************************* */
+  let view = { x:0, y:0, w:800, h:600 };
+  let bbox = { minX:0, minY:0, maxX:800, maxY:600 };
+  const setViewBox = ()=> graphSvg.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`);
+
+  const ellipsis = (str, maxPx, avgCharPx=7)=> {
+    if (!str) return ""; const maxChars = Math.max(1, Math.floor(maxPx / avgCharPx));
+    return (str.length<=maxChars) ? str : (str.slice(0, Math.max(0,maxChars-1)) + '…');
+  };
+
+  function computeLayout() {
+    const nodes = [...state.nodes.keys()];
+    const out = new Map(nodes.map(id=>[id,new Set()])); const inDeg = new Map(nodes.map(id=>[id,0]));
+    for (const k of state.edges) { const {p,c}=parseEdgeKey(k); if (!out.has(p)) out.set(p,new Set()); out.get(p).add(c); inDeg.set(c,(inDeg.get(c)||0)+1); }
+    // Kahn topo
+    const q=[]; for (const id of nodes) if ((inDeg.get(id)||0)===0) q.push(id);
+    const topo=[]; while(q.length){ const v=q.shift(); topo.push(v); for (const w of out.get(v)||[]) { inDeg.set(w,(inDeg.get(w)||0)-1); if (inDeg.get(w)===0) q.push(w); } }
+    // longest distance ranks (rootHint起点を優先)
+    const dist = new Map(nodes.map(id=>[id,0])); const hint=state.rootHint.trim();
+    if (hint && state.nodes.has(hint)) { for (const id of nodes) dist.set(id, Number.NEGATIVE_INFINITY); dist.set(hint,0); }
+    const parents = new Map(nodes.map(id=>[id,new Set()])); for (const k of state.edges) { const {p,c}=parseEdgeKey(k); parents.get(c)?.add(p); }
+    for (const v of topo) {
+      const ps=parents.get(v)||new Set(); let best=(dist.get(v)===Number.NEGATIVE_INFINITY)?Number.NEGATIVE_INFINITY:0;
+      for (const u of ps) { const du=dist.get(u); if (du!==Number.NEGATIVE_INFINITY) best = Math.max(best, du+1); }
+      if (best!==Number.NEGATIVE_INFINITY) dist.set(v, Math.max(dist.get(v), best));
+    }
+    for (const id of nodes) if (dist.get(id)===Number.NEGATIVE_INFINITY) dist.set(id,0);
+    const ranks=new Map(); for (const id of nodes) { const r=dist.get(id)||0; if(!ranks.has(r)) ranks.set(r,[]); ranks.get(r).push(id); }
+    for (const [r,arr] of ranks) arr.sort((a,b)=> String(a).localeCompare(String(b),'ja'));
+    return {ranks};
+  }
+
+  function drawSVG() {
+    // 既存（defs除く）クリア
+    while (graphSvg.lastChild && graphSvg.lastChild.tagName!=='defs') graphSvg.removeChild(graphSvg.lastChild);
+
+    const {ranks} = computeLayout();
+    const dir = state.direction;
+
+    // ノード見た目設定
+    const nodeW=150, nodeH=56, hGap=56, vGap=28, padX=10, idFont=13, labelFont=12;
+
+    // 位置計算
+    const pos=new Map(); const rankKeys=[...ranks.keys()].sort((a,b)=>a-b); let maxRows=0;
+    rankKeys.forEach((rk,i)=>{
+      const arr=ranks.get(rk); maxRows=Math.max(maxRows, arr.length);
+      arr.forEach((id,j)=>{ const x=(dir==='LR') ? i*(nodeW+hGap) : j*(nodeW+hGap); const y=(dir==='LR') ? j*(nodeH+vGap) : i*(nodeH+vGap); pos.set(id,{x,y}); });
+    });
+
+    // コンテンツサイズ
+    const contentW = (dir==='LR') ? (rankKeys.length-1)*(nodeW+hGap)+nodeW : (maxRows-1)*(nodeW+hGap)+nodeW;
+    const contentH = (dir==='LR') ? (maxRows-1)*(nodeH+vGap)+nodeH : (rankKeys.length-1)*(nodeH+vGap)+nodeH;
+
+    // === ハイライト対象集合の計算 ===
+    let focusNodes=null, focusEdges=null, focusCenter=null;
+    if (state.focus && state.nodes.has(state.focus.id)) {
+      const depth = (state.focus.depth==null || isNaN(state.focus.depth)) ? null : Math.max(1, Number(state.focus.depth));
+      const {nodeSet, edgeSet} = computeFocusSets(state.focus.id, state.focus.mode, depth);
+      focusNodes = nodeSet; focusEdges = edgeSet; focusCenter = state.focus.id;
+    }
+
+    // --- エッジ描画（背面） ---
+    for (const k of state.edges) {
+      const {p,c}=parseEdgeKey(k);
+      const a=pos.get(p), b=pos.get(c); if (!a||!b) continue;
+
+      // 方向ごとの端点
+      const srcX = a.x + (dir==='LR' ? nodeW : nodeW/2);
+      const srcY = a.y + (dir==='LR' ? nodeH/2 : nodeH);
+      const dstX = b.x + (dir==='LR' ? 0 : nodeW/2);
+      const dstY = b.y + (dir==='LR' ? nodeH/2 : 0);
+
+      // ベジェ曲線
+      const dx=Math.max(40, Math.abs(dstX-srcX)*0.5);
+      const dy=Math.max(20, Math.abs(dstY-srcY)*0.5);
+      const c1x=(dir==='LR')?srcX+dx:srcX, c1y=(dir==='LR')?srcY:srcY+dy;
+      const c2x=(dir==='LR')?dstX-dx:dstX, c2y=(dir==='LR')?dstY:dstY-dy;
+
+      const path=document.createElementNS('http://www.w3.org/2000/svg','path');
+      path.setAttribute('d', `M ${srcX} ${srcY} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${dstX} ${dstY}`);
+      path.setAttribute('fill','none'); path.setAttribute('stroke','var(--edge)'); path.setAttribute('stroke-width','1.5');
+      path.setAttribute('marker-end','url(#arrow)'); path.setAttribute('opacity','0.95');
+
+      // ハイライト適用：対象エッジなら強調 / それ以外はdim
+      if (focusEdges) {
+        if (focusEdges.has(edgeKey(p,c))) path.classList.add('hi-edge');
+        else path.classList.add('dim');
+      }
+
+      // クリックでエッジ削除
+      path.addEventListener('click', ()=>{ if (confirm(`この依存を削除しますか？\n${p} → ${c}`)) removeEdge(p,c); });
+      graphSvg.appendChild(path);
+    }
+
+    // --- ノード描画（前面） ---
+    for (const [id,p] of pos.entries()) {
+      const n = state.nodes.get(id); const label = n?.label || "";
+
+      // グループ
+      const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+      g.setAttribute('transform', `translate(${p.x},${p.y})`);
+
+      // 本体（角丸矩形）
+      const rect = document.createElementNS('http://www.w3.org/2000/svg','rect');
+      rect.setAttribute('x','0'); rect.setAttribute('y','0'); rect.setAttribute('width',String(nodeW)); rect.setAttribute('height',String(nodeH));
+      rect.setAttribute('rx','8'); rect.setAttribute('ry','8'); rect.setAttribute('fill','#fff'); rect.setAttribute('stroke','#cbd5e1'); rect.setAttribute('stroke-width','1.25');
+
+      // テキスト1行目：ID
+      const idText = document.createElementNS('http://www.w3.org/2000/svg','text');
+      idText.setAttribute('x',String(nodeW/2)); idText.setAttribute('y',String(nodeH/2 - 2)); idText.setAttribute('text-anchor','middle');
+      idText.setAttribute('font-size',String(idFont)); idText.setAttribute('font-weight','700'); idText.setAttribute('fill','#0f172a');
+      idText.textContent = id;
+
+      // テキスト2行目：ラベル（省略…）
+      const labelText = document.createElementNS('http://www.w3.org/2000/svg','text');
+      labelText.setAttribute('x',String(nodeW/2)); labelText.setAttribute('y',String(nodeH/2 + 14)); labelText.setAttribute('text-anchor','middle');
+      labelText.setAttribute('font-size',String(labelFont)); labelText.setAttribute('fill','#334155'); labelText.setAttribute('opacity', label?'1':'0.55');
+      labelText.textContent = label ? ellipsis(label, nodeW - padX*2, 7) : "(ラベルなし)";
+
+      // ツールチップ（フル表示）
+      const title = document.createElementNS('http://www.w3.org/2000/svg','title');
+      title.textContent = label ? `${id} — ${label}` : id;
+
+      // ハイライト適用：対象ノード/中心ノード/非対象のdim化
+      if (focusNodes) {
+        if (focusNodes.has(id)) {
+          rect.classList.add('hi-node');
+          if (id===focusCenter) rect.classList.add('hi-center');
+        } else {
+          g.classList.add('dim');
+        }
+      }
+
+      // ホバー装飾
+      g.addEventListener('mouseenter', ()=>{ rect.style.stroke = '#06b6d4'; rect.style.strokeWidth = '2'; });
+      g.addEventListener('mouseleave', ()=>{ rect.style.stroke = focusNodes && focusNodes.has(id) ? rect.style.stroke : '#cbd5e1'; rect.style.strokeWidth = focusNodes && focusNodes.has(id) ? rect.style.strokeWidth : '1.25'; });
+
+      // クリック：このノードを中心にハイライト（現在のモード/深さを利用）
+      g.addEventListener('click', ()=>{
+        const mode = document.getElementById('focusMode').value;
+        const depthStr = document.getElementById('focusDepth').value.trim();
+        const depth = depthStr==="" ? null : Number(depthStr);
+        state.focus = { id, mode, depth: (depth==null || isNaN(depth)) ? null : depth };
+        // 入力欄へ反映
+        document.getElementById('focusId').value = id;
+        drawSVG();
+      });
+
+      g.append(rect,idText,labelText,title);
+      graphSvg.appendChild(g);
+    }
+
+    // bbox更新 & 初期viewBox
+    bbox = {minX:0,minY:0,maxX:contentW,maxY:contentH};
+    if (!graphSvg.hasAttribute('viewBox')) {
+      view = { x:0, y:0, w:Math.max(800, contentW+80), h:Math.max(600, contentH+80) };
+      setViewBox();
+    }
+  }
+
+  /* ***************************************************************************
+   * パン/ズーム・フィット・SVGエクスポート
+   * ************************************************************************* */
+  (function(){
+    let isPanning=false, start={x:0,y:0}, startView={x:0,y:0};
+    graphSvg.addEventListener('mousedown', ev=>{ isPanning=true; start={x:ev.clientX,y:ev.clientY}; startView={...view}; });
+    window.addEventListener('mousemove', ev=>{
+      if (!isPanning) return;
+      const dx = (ev.clientX-start.x) * (view.w / graphSvg.clientWidth);
+      const dy = (ev.clientY-start.y) * (view.h / graphSvg.clientHeight);
+      view.x = startView.x - dx; view.y = startView.y - dy; setViewBox();
+    });
+    window.addEventListener('mouseup', ()=>{ isPanning=false; });
+    graphSvg.addEventListener('wheel', ev=>{
+      ev.preventDefault();
+      const scale = (ev.deltaY<0) ? 0.9 : 1.1;
+      const mx = ev.offsetX / graphSvg.clientWidth; const my = ev.offsetY / graphSvg.clientHeight;
+      const vx = view.x + view.w*mx; const vy = view.y + view.h*my;
+      view.w *= scale; view.h *= scale;
+      view.x = vx - view.w*mx; view.y = vy - view.h*my; setViewBox();
+    }, {passive:false});
+  })();
+
+  document.getElementById('fitBtn').onclick = ()=>{
+    const pad=40;
+    view = { x:Math.max(0,bbox.minX)-pad, y:Math.max(0,bbox.minY)-pad, w:(bbox.maxX-bbox.minX)+pad*2, h:(bbox.maxY-bbox.minY)+pad*2 };
+    setViewBox();
+  };
+  document.getElementById('exportSvgBtn').onclick = ()=>{
+    const clone = graphSvg.cloneNode(true); clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
+    const s = new XMLSerializer().serializeToString(clone);
+    const blob = new Blob([s], {type:'image/svg+xml'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='dag.svg'; a.click(); URL.revokeObjectURL(a.href);
+  };
+
+  // 描画オプション
+  document.getElementById('directionSel').addEventListener('change', e=>{ state.direction=e.target.value; graphSvg.removeAttribute('viewBox'); drawSVG(); document.getElementById('fitBtn').click(); });
+  document.getElementById('rootHint').addEventListener('change', e=>{ state.rootHint=e.target.value.trim(); graphSvg.removeAttribute('viewBox'); drawSVG(); document.getElementById('fitBtn').click(); });
+
+  /* ***************************************************************************
+   * ハイライト操作（UI）
+   * ************************************************************************* */
+  document.getElementById('applyFocusBtn').onclick = ()=>{
+    const id = document.getElementById('focusId').value.trim();
+    if (!id || !state.nodes.has(id)) { alert('存在する中心IDを指定してください'); return; }
+    const mode = document.getElementById('focusMode').value;
+    const depthStr = document.getElementById('focusDepth').value.trim();
+    const depth = depthStr==="" ? null : Number(depthStr);
+    state.focus = { id, mode, depth:(depth==null||isNaN(depth))?null:depth };
+    drawSVG();
+  };
+  document.getElementById('clearFocusBtn').onclick = ()=>{ state.focus=null; document.getElementById('focusId').value=""; drawSVG(); };
+  // Escキーで解除
+  window.addEventListener('keydown', e=>{ if (e.key==='Escape') { state.focus=null; document.getElementById('focusId').value=""; drawSVG(); } });
+
+  /* ***************************************************************************
+   * 共通UI（Undo/Redo・入出力・リセット・フィルタ）
+   * ************************************************************************* */
+  document.getElementById('undoBtn').onclick=undo;
+  document.getElementById('redoBtn').onclick=redo;
+  document.getElementById('exportBtn').onclick=exportJSON;
+  document.getElementById('importBtn').onclick=()=> document.getElementById('fileInput').click();
+  document.getElementById('fileInput').addEventListener('change', e=>{
+    const f=e.target.files?.[0]; if (!f) return;
+    const fr=new FileReader(); fr.onload=()=>{ try{ importJSON(JSON.parse(fr.result)); }catch{ alert("JSON読取エラー"); } }; fr.readAsText(f);
+  });
+  document.getElementById('clearBtn').onclick=()=>{
+    if (!confirm("全データを削除します。よろしいですか？")) return;
+    state.nodes.clear(); state.edges.clear(); state.history.length=0; state.future.length=0; state.focus=null;
+    localStorage.removeItem('dag-linker');
+    seed(); graphSvg.removeAttribute('viewBox'); drawSVG(); document.getElementById('fitBtn').click();
+  };
+  document.getElementById('filterLeft').addEventListener('input', render);
+  document.getElementById('filterRight').addEventListener('input', render);
+
+  /* ***************************************************************************
+   * 初期化（保存済み → 復元 or シード）
+   * ************************************************************************* */
+  try { const raw=localStorage.getItem('dag-linker'); if (raw) importJSON(JSON.parse(raw)); } catch {}
+  if (state.nodes.size===0) seed();
+  setTimeout(()=> document.getElementById('fitBtn').click(), 0);
+})();
+</script>
+</body>
+</html>
